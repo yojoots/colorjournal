@@ -89,6 +89,24 @@ struct AppConfig {
         // This is now a placeholder, actual activities come from ActivitiesManager
         return []
     }
+
+    static func daysInYear(_ year: Int) -> Int {
+        let calendar = Calendar.current
+        var components = DateComponents()
+        components.year = year
+        components.month = 12
+        components.day = 31
+        if let date = calendar.date(from: components) {
+            return calendar.ordinality(of: .day, in: .year, for: date) ?? 365
+        }
+        return 365
+    }
+
+    static var daysInCurrentYear: Int {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
+        return daysInYear(year)
+    }
 }
 
 struct YearGridView: View {
@@ -106,7 +124,7 @@ struct YearGridView: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
-                    ForEach(1...365, id: \.self) { day in
+                    ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
                         VStack(spacing: 1) {
                             ForEach(activities.indices, id: \.self) { index in
                                 let dayData = yearData[day] ?? []
@@ -177,13 +195,20 @@ class LocalDataManager: ObservableObject {
         }
     }
 
+    func clearAllData() {
+        allData.removeAll()
+        defaults.removeObject(forKey: dataKey)
+        cellStatuses.removeAll()
+        yearData.removeAll()
+    }
+
     func fetchYearData(activitiesCount: Int = 13) {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
         var newYearData: [Int: [Bool]] = [:]
 
         // Build year data from stored data
-        for day in 1...365 {
+        for day in 1...AppConfig.daysInYear(year) {
             var dateComponents = DateComponents()
             dateComponents.year = year
             dateComponents.day = day
@@ -276,8 +301,8 @@ class LocalDataManager: ObservableObject {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
 
-        // Generate CSV for all 365 days of the current year
-        for day in 1...365 {
+        // Generate CSV for all days of the current year
+        for day in 1...AppConfig.daysInYear(year) {
             var dateComponents = DateComponents()
             dateComponents.year = year
             dateComponents.day = day
@@ -345,6 +370,10 @@ class GoogleSheetsExporter: ObservableObject {
                 self?.isSignedIn = true
                 completion(true)
             } else {
+                DispatchQueue.main.async {
+                    let errorMsg = error?.localizedDescription ?? "Sign in cancelled"
+                    self?.exportStatus = "Sign in failed: \(errorMsg)"
+                }
                 completion(false)
             }
         }
@@ -352,6 +381,7 @@ class GoogleSheetsExporter: ObservableObject {
 
     func createNewSpreadsheet(completion: @escaping (Bool, String?) -> Void) {
         guard let service = service else {
+            exportStatus = "Please sign in first"
             completion(false, nil)
             return
         }
@@ -369,7 +399,9 @@ class GoogleSheetsExporter: ObservableObject {
             DispatchQueue.main.async {
                 if let error = error {
                     self?.isExporting = false
-                    self?.exportStatus = "Error: \(error.localizedDescription)"
+                    let errorMsg = error.localizedDescription
+                    self?.exportStatus = "Failed to create spreadsheet"
+                    print("Error creating spreadsheet: \(errorMsg)")
                     completion(false, nil)
                     return
                 }
@@ -381,6 +413,7 @@ class GoogleSheetsExporter: ObservableObject {
                     completion(true, spreadsheetId)
                 } else {
                     self?.isExporting = false
+                    self?.exportStatus = "Failed to create spreadsheet"
                     completion(false, nil)
                 }
             }
@@ -389,7 +422,7 @@ class GoogleSheetsExporter: ObservableObject {
 
     func exportToGoogleSheets(dataManager: LocalDataManager, activitiesManager: ActivitiesManager, spreadsheetId: String, completion: @escaping (Bool, String) -> Void) {
         guard let service = service else {
-            completion(false, "Not signed in")
+            completion(false, "Please sign in to Google first")
             return
         }
 
@@ -398,17 +431,19 @@ class GoogleSheetsExporter: ObservableObject {
 
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
+        let daysInYear = AppConfig.daysInYear(year)
+        let totalColumns = daysInYear + 1  // +1 for activity names column
 
         // Build the data with colors
         var requests: [GTLRSheets_Request] = []
 
-        // 1. Resize sheet to have enough columns (366 columns needed)
+        // 1. Resize sheet to have enough columns
         let resizeRequest = GTLRSheets_Request()
         let updateSheetProperties = GTLRSheets_UpdateSheetPropertiesRequest()
         let sheetProperties = GTLRSheets_SheetProperties()
         sheetProperties.sheetId = 0
         let gridProperties = GTLRSheets_GridProperties()
-        gridProperties.columnCount = NSNumber(value: 366)
+        gridProperties.columnCount = NSNumber(value: totalColumns)
         gridProperties.rowCount = NSNumber(value: activitiesManager.activities.count + 1) // 1 header + activities
         sheetProperties.gridProperties = gridProperties
         updateSheetProperties.properties = sheetProperties
@@ -423,7 +458,7 @@ class GoogleSheetsExporter: ObservableObject {
         dimensionRange.sheetId = 0
         dimensionRange.dimension = "COLUMNS"
         dimensionRange.startIndex = 1  // Start from column B (first date column)
-        dimensionRange.endIndex = 366  // Through all date columns
+        dimensionRange.endIndex = NSNumber(value: totalColumns)  // Through all date columns
         updateDimensionProperties.range = dimensionRange
 
         let dimensionProperties = GTLRSheets_DimensionProperties()
@@ -442,8 +477,8 @@ class GoogleSheetsExporter: ObservableObject {
         let emptyCell = GTLRSheets_CellData()
         headerCells.append(emptyCell)
 
-        // Date headers for all 365 days
-        for day in 1...365 {
+        // Date headers for all days
+        for day in 1...daysInYear {
             var dateComponents = DateComponents()
             dateComponents.year = year
             dateComponents.day = day
@@ -473,7 +508,7 @@ class GoogleSheetsExporter: ObservableObject {
             cells.append(nameCell)
 
             // Cell for each day
-            for day in 1...365 {
+            for day in 1...daysInYear {
                 var dateComponents = DateComponents()
                 dateComponents.year = year
                 dateComponents.day = day
@@ -524,7 +559,7 @@ class GoogleSheetsExporter: ObservableObject {
         gridRange.startRowIndex = 0
         gridRange.startColumnIndex = 0
         gridRange.endRowIndex = NSNumber(value: rowData.count)
-        gridRange.endColumnIndex = NSNumber(value: 366) // 1 label column + 365 days
+        gridRange.endColumnIndex = NSNumber(value: totalColumns)
 
         updateCells.range = gridRange
         updateCells.fields = "userEnteredValue,userEnteredFormat.backgroundColor"
@@ -546,8 +581,23 @@ class GoogleSheetsExporter: ObservableObject {
                 self?.isExporting = false
 
                 if let error = error {
-                    self?.exportStatus = "Error: \(error.localizedDescription)"
-                    completion(false, error.localizedDescription)
+                    let errorMsg = error.localizedDescription
+                    self?.exportStatus = "Export failed"
+                    print("Export error: \(errorMsg)")
+
+                    // Provide user-friendly error messages
+                    let userMessage: String
+                    if errorMsg.contains("permission") || errorMsg.contains("access") {
+                        userMessage = "Permission denied. Please make sure you have access to this spreadsheet."
+                    } else if errorMsg.contains("not found") || errorMsg.contains("404") {
+                        userMessage = "Spreadsheet not found. Please check the URL and try again."
+                    } else if errorMsg.contains("network") || errorMsg.contains("internet") {
+                        userMessage = "Network error. Please check your internet connection."
+                    } else {
+                        userMessage = "Export failed. Please try again."
+                    }
+
+                    completion(false, userMessage)
                 } else {
                     self?.exportStatus = "Export complete!"
                     self?.savedSpreadsheetId = spreadsheetId
@@ -850,7 +900,7 @@ struct ContentView: View {
             ExportView(dataManager: dataManager, activitiesManager: activitiesManager)
         }
         .sheet(isPresented: $showSettingsSheet) {
-            SettingsView(activitiesManager: activitiesManager)
+            SettingsView(activitiesManager: activitiesManager, dataManager: dataManager)
         }
     }
 }
@@ -1023,7 +1073,7 @@ struct ExportView: View {
                                 .padding(.horizontal)
                             }
 
-                            Text("Exports all 365 days with colored streaks!")
+                            Text("Exports all days of the year with colored streaks!")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .padding(.horizontal)
@@ -1090,9 +1140,11 @@ struct ExportView: View {
 
 struct SettingsView: View {
     @ObservedObject var activitiesManager: ActivitiesManager
+    @ObservedObject var dataManager: LocalDataManager
     @Environment(\.dismiss) var dismiss
     @State private var editingActivity: Activity?
     @State private var showingEditSheet = false
+    @State private var showingClearDataAlert = false
 
     var body: some View {
         NavigationView {
@@ -1149,14 +1201,39 @@ struct SettingsView: View {
                         Text("Add Activity")
                     }
                 }
+
+                Section {
+                    Button(action: {
+                        showingClearDataAlert = true
+                    }) {
+                        HStack {
+                            Image(systemName: "trash.fill")
+                                .foregroundColor(.red)
+                            Text("Clear All Data")
+                                .foregroundColor(.red)
+                        }
+                    }
+                } header: {
+                    Text("Data Management")
+                } footer: {
+                    Text("This will permanently delete all your activity tracking data. Your custom activities list will be preserved.")
+                }
             }
-            .navigationTitle("Edit Activities")
+            .navigationTitle("Settings")
             .navigationBarItems(
                 leading: EditButton(),
                 trailing: Button("Done") {
                     dismiss()
                 }
             )
+        }
+        .alert("Clear All Data?", isPresented: $showingClearDataAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear All Data", role: .destructive) {
+                dataManager.clearAllData()
+            }
+        } message: {
+            Text("This will permanently delete all your activity tracking data. This cannot be undone.")
         }
         .sheet(isPresented: $showingEditSheet) {
             if let activity = editingActivity {
