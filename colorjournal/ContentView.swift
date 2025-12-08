@@ -1,28 +1,100 @@
 import SwiftUI
+import GoogleSignIn
+import GoogleAPIClientForREST
+import GTMSessionFetcher
 
-// Configuration struct
+// Activity model
+struct Activity: Identifiable, Codable {
+    var id: UUID
+    var name: String
+    var colorHex: String
+
+    var color: Color {
+        Color(hex: colorHex)
+    }
+
+    init(id: UUID = UUID(), name: String, color: Color) {
+        self.id = id
+        self.name = name
+        self.colorHex = color.toHex()
+    }
+}
+
+// Activities Manager
+class ActivitiesManager: ObservableObject {
+    @Published var activities: [Activity] = []
+
+    private let defaults = UserDefaults.standard
+    private let activitiesKey = "customActivities"
+
+    init() {
+        loadActivities()
+    }
+
+    private func loadActivities() {
+        if let data = defaults.data(forKey: activitiesKey),
+           let decoded = try? JSONDecoder().decode([Activity].self, from: data) {
+            activities = decoded
+        } else {
+            // Default activities with concrete RGB colors
+            activities = [
+                Activity(name: "Exercise 🏋️‍♂️", color: Color(red: 1.0, green: 0.2, blue: 0.2)),
+                Activity(name: "Stretch 🤸‍♀️", color: Color(red: 0.6, green: 0.95, blue: 0.8)),
+                Activity(name: "Food 🥦", color: Color(red: 0.2, green: 0.8, blue: 0.2)),
+                Activity(name: "Create 🛠️", color: Color(red: 0.2, green: 0.4, blue: 1.0)),
+                Activity(name: "Work 💻", color: Color(red: 0.2, green: 0.7, blue: 0.7)),
+                Activity(name: "Read 📚", color: Color(red: 1.0, green: 0.9, blue: 0.0)),
+                Activity(name: "Journal ✍️", color: Color(red: 0.7, green: 0.3, blue: 0.9)),
+                Activity(name: "Meditate 🧘", color: Color(red: 1.0, green: 0.6, blue: 0.0)),
+                Activity(name: "Music 🎵", color: Color(red: 0.3, green: 0.2, blue: 0.8)),
+                Activity(name: "Chores 🧹", color: Color(red: 1.0, green: 0.4, blue: 0.7)),
+                Activity(name: "Sleep 💤", color: Color(red: 0.2, green: 0.8, blue: 1.0)),
+                Activity(name: "Leafless 🌿", color: Color(red: 0.6, green: 0.6, blue: 0.6)),
+                Activity(name: "Sick 🤒", color: Color(red: 0.6, green: 0.4, blue: 0.2))
+            ]
+        }
+    }
+
+    func saveActivities() {
+        if let encoded = try? JSONEncoder().encode(activities) {
+            defaults.set(encoded, forKey: activitiesKey)
+        }
+    }
+
+    func addActivity(_ activity: Activity) {
+        activities.append(activity)
+        saveActivities()
+    }
+
+    func deleteActivity(at index: Int) {
+        activities.remove(at: index)
+        saveActivities()
+    }
+
+    func moveActivity(from: IndexSet, to: Int) {
+        activities.move(fromOffsets: from, toOffset: to)
+        saveActivities()
+    }
+
+    func updateActivity(at index: Int, name: String, color: Color) {
+        activities[index].name = name
+        activities[index].colorHex = color.toHex()
+        saveActivities()
+    }
+}
+
+// Configuration struct (for backwards compatibility)
 struct AppConfig {
-    static let colors: [(name: String, color: Color)] = [
-        ("Exercise 🏋️‍♂️", .red),
-        ("Stretch 🤸‍♀️", .mint),
-        ("Food 🥦", .green),
-        ("Create 🛠️", .blue),
-        ("Work 💻", .teal),
-        ("Read 📚", .yellow),
-        ("Journal ✍️", .purple),
-        ("Meditate 🧘", .orange),
-        ("Music 🎵", .indigo),
-        ("Chores 🧹", .pink),
-        ("Sleep 💤", .cyan),
-        ("Leafless 🌿", .gray),
-        ("Sick 🤒", .brown)
-    ]
+    static var colors: [(name: String, color: Color)] {
+        // This is now a placeholder, actual activities come from ActivitiesManager
+        return []
+    }
 }
 
 struct YearGridView: View {
     let yearData: [Int: [Bool]]  // Day number -> array of activity statuses
     let selectedDate: Date
-    let colors: [(name: String, color: Color)]
+    let activities: [Activity]
 
     private func getDayOfYear(_ date: Date) -> Int {
         let calendar = Calendar.current
@@ -36,10 +108,11 @@ struct YearGridView: View {
                 HStack(spacing: 0) {
                     ForEach(1...365, id: \.self) { day in
                         VStack(spacing: 1) {
-                            ForEach(colors.indices, id: \.self) { index in
-                                let isColored = yearData[day]?[index] ?? false
+                            ForEach(activities.indices, id: \.self) { index in
+                                let dayData = yearData[day] ?? []
+                                let isColored = index < dayData.count ? dayData[index] : false
                                 Rectangle()
-                                    .fill(isColored ? colors[index].color : Color.black)
+                                    .fill(isColored ? activities[index].color : Color.black)
                                     .frame(width: 3, height: 3)
                             }
                         }
@@ -74,18 +147,18 @@ class LocalDataManager: ObservableObject {
     @Published var cellStatuses: [Int: Bool] = [:] // Track colored status for each row
     @Published var yearData: [Int: [Bool]] = [:] // Day -> Array of activity statuses
 
-    private let defaults = UserDefaults.standard
-    private let dataKey = "activityData"
+    let defaults = UserDefaults.standard
+    let dataKey = "activityData"
 
     // Data structure: [dateString: [activityIndex: true/false]]
-    private var allData: [String: [Int: Bool]] = [:]
+    var allData: [String: [Int: Bool]] = [:]
 
     init() {
         loadData()
-        fetchYearData()
+        // fetchYearData will be called from ContentView with proper activities count
     }
 
-    private func dateKey(from date: Date) -> String {
+    func dateKey(from date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
@@ -104,7 +177,7 @@ class LocalDataManager: ObservableObject {
         }
     }
 
-    func fetchYearData() {
+    func fetchYearData(activitiesCount: Int = 13) {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
         var newYearData: [Int: [Bool]] = [:]
@@ -119,7 +192,7 @@ class LocalDataManager: ObservableObject {
                 let key = dateKey(from: date)
                 let dayActivities = allData[key] ?? [:]
 
-                var activitiesArray = Array(repeating: false, count: AppConfig.colors.count)
+                var activitiesArray = Array(repeating: false, count: activitiesCount)
                 for (index, isActive) in dayActivities {
                     if index < activitiesArray.count {
                         activitiesArray[index] = isActive
@@ -134,13 +207,13 @@ class LocalDataManager: ObservableObject {
         }
     }
 
-    func fetchCellStatus(date: Date) {
+    func fetchCellStatus(date: Date, activitiesCount: Int = 13) {
         let key = dateKey(from: date)
         let dayData = allData[key] ?? [:]
 
         DispatchQueue.main.async {
             self.cellStatuses.removeAll()
-            for index in 0..<AppConfig.colors.count {
+            for index in 0..<activitiesCount {
                 self.cellStatuses[index] = dayData[index] ?? false
             }
         }
@@ -197,8 +270,8 @@ class LocalDataManager: ObservableObject {
     }
 
     // Export functionality
-    func exportToCSV() -> String {
-        var csv = "Date," + AppConfig.colors.map { $0.name }.joined(separator: ",") + "\n"
+    func exportToCSV(activities: [Activity]) -> String {
+        var csv = "Date," + activities.map { $0.name }.joined(separator: ",") + "\n"
 
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
@@ -214,7 +287,7 @@ class LocalDataManager: ObservableObject {
                 let dayData = allData[dateString] ?? [:]
                 var row = [dateString]
 
-                for index in 0..<AppConfig.colors.count {
+                for index in 0..<activities.count {
                     row.append(dayData[index] == true ? "✓" : "")
                 }
                 csv += row.joined(separator: ",") + "\n"
@@ -222,6 +295,270 @@ class LocalDataManager: ObservableObject {
         }
 
         return csv
+    }
+}
+
+// Google Sheets Exporter for colored export
+class GoogleSheetsExporter: ObservableObject {
+    private var service: GTLRSheetsService?
+    @Published var isSignedIn = false
+    @Published var isExporting = false
+    @Published var exportStatus: String = ""
+
+    private let defaults = UserDefaults.standard
+    private let savedSpreadsheetKey = "savedSpreadsheetId"
+
+    var savedSpreadsheetId: String? {
+        get { defaults.string(forKey: savedSpreadsheetKey) }
+        set { defaults.set(newValue, forKey: savedSpreadsheetKey) }
+    }
+
+    init() {
+        // Restore previous sign-in
+        GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
+            if let user = user {
+                let service = GTLRSheetsService()
+                service.authorizer = user.fetcherAuthorizer
+                self?.service = service
+                DispatchQueue.main.async {
+                    self?.isSignedIn = true
+                }
+            }
+        }
+    }
+
+    func signIn(completion: @escaping (Bool) -> Void) {
+        guard let presentingViewController = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.rootViewController else {
+            completion(false)
+            return
+        }
+
+        GIDSignIn.sharedInstance.signIn(
+            withPresenting: presentingViewController,
+            hint: nil,
+            additionalScopes: ["https://www.googleapis.com/auth/spreadsheets"]
+        ) { [weak self] result, error in
+            if let user = result?.user {
+                let service = GTLRSheetsService()
+                service.authorizer = user.fetcherAuthorizer
+                self?.service = service
+                self?.isSignedIn = true
+                completion(true)
+            } else {
+                completion(false)
+            }
+        }
+    }
+
+    func createNewSpreadsheet(completion: @escaping (Bool, String?) -> Void) {
+        guard let service = service else {
+            completion(false, nil)
+            return
+        }
+
+        isExporting = true
+        exportStatus = "Creating new spreadsheet..."
+
+        let spreadsheet = GTLRSheets_Spreadsheet()
+        spreadsheet.properties = GTLRSheets_SpreadsheetProperties()
+        spreadsheet.properties?.title = "Color Journal Export - \(Date().formatted(date: .abbreviated, time: .omitted))"
+
+        let query = GTLRSheetsQuery_SpreadsheetsCreate.query(withObject: spreadsheet)
+
+        service.executeQuery(query) { [weak self] (ticket, result, error) in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self?.isExporting = false
+                    self?.exportStatus = "Error: \(error.localizedDescription)"
+                    completion(false, nil)
+                    return
+                }
+
+                if let createdSheet = result as? GTLRSheets_Spreadsheet,
+                   let spreadsheetId = createdSheet.spreadsheetId {
+                    self?.savedSpreadsheetId = spreadsheetId
+                    self?.exportStatus = "Spreadsheet created!"
+                    completion(true, spreadsheetId)
+                } else {
+                    self?.isExporting = false
+                    completion(false, nil)
+                }
+            }
+        }
+    }
+
+    func exportToGoogleSheets(dataManager: LocalDataManager, activitiesManager: ActivitiesManager, spreadsheetId: String, completion: @escaping (Bool, String) -> Void) {
+        guard let service = service else {
+            completion(false, "Not signed in")
+            return
+        }
+
+        isExporting = true
+        exportStatus = "Exporting data with colors..."
+
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
+
+        // Build the data with colors
+        var requests: [GTLRSheets_Request] = []
+
+        // 1. Resize sheet to have enough columns (366 columns needed)
+        let resizeRequest = GTLRSheets_Request()
+        let updateSheetProperties = GTLRSheets_UpdateSheetPropertiesRequest()
+        let sheetProperties = GTLRSheets_SheetProperties()
+        sheetProperties.sheetId = 0
+        let gridProperties = GTLRSheets_GridProperties()
+        gridProperties.columnCount = NSNumber(value: 366)
+        gridProperties.rowCount = NSNumber(value: activitiesManager.activities.count + 1) // 1 header + activities
+        sheetProperties.gridProperties = gridProperties
+        updateSheetProperties.properties = sheetProperties
+        updateSheetProperties.fields = "gridProperties.columnCount,gridProperties.rowCount"
+        resizeRequest.updateSheetProperties = updateSheetProperties
+        requests.append(resizeRequest)
+
+        // Set column widths - narrow date columns
+        let columnWidthRequest = GTLRSheets_Request()
+        let updateDimensionProperties = GTLRSheets_UpdateDimensionPropertiesRequest()
+        let dimensionRange = GTLRSheets_DimensionRange()
+        dimensionRange.sheetId = 0
+        dimensionRange.dimension = "COLUMNS"
+        dimensionRange.startIndex = 1  // Start from column B (first date column)
+        dimensionRange.endIndex = 366  // Through all date columns
+        updateDimensionProperties.range = dimensionRange
+
+        let dimensionProperties = GTLRSheets_DimensionProperties()
+        dimensionProperties.pixelSize = NSNumber(value: 35)  // Narrow width for dates
+        updateDimensionProperties.properties = dimensionProperties
+        updateDimensionProperties.fields = "pixelSize"
+        columnWidthRequest.updateDimensionProperties = updateDimensionProperties
+        requests.append(columnWidthRequest)
+
+        // 2. Create header row with dates across the top
+        var rowData: [GTLRSheets_RowData] = []
+        let headerRow = GTLRSheets_RowData()
+        var headerCells: [GTLRSheets_CellData] = []
+
+        // Empty first cell (top-left corner)
+        let emptyCell = GTLRSheets_CellData()
+        headerCells.append(emptyCell)
+
+        // Date headers for all 365 days
+        for day in 1...365 {
+            var dateComponents = DateComponents()
+            dateComponents.year = year
+            dateComponents.day = day
+
+            if let date = calendar.date(from: dateComponents) {
+                let cell = GTLRSheets_CellData()
+                cell.userEnteredValue = GTLRSheets_ExtendedValue()
+                // Format as M/D (e.g., 1/1, 1/2, ..., 12/31)
+                let formatter = DateFormatter()
+                formatter.dateFormat = "M/d"
+                cell.userEnteredValue?.stringValue = formatter.string(from: date)
+                headerCells.append(cell)
+            }
+        }
+        headerRow.values = headerCells
+        rowData.append(headerRow)
+
+        // 3. Create one row per activity
+        for (activityIndex, activity) in activitiesManager.activities.enumerated() {
+            let row = GTLRSheets_RowData()
+            var cells: [GTLRSheets_CellData] = []
+
+            // Activity name in first column
+            let nameCell = GTLRSheets_CellData()
+            nameCell.userEnteredValue = GTLRSheets_ExtendedValue()
+            nameCell.userEnteredValue?.stringValue = activity.name
+            cells.append(nameCell)
+
+            // Cell for each day
+            for day in 1...365 {
+                var dateComponents = DateComponents()
+                dateComponents.year = year
+                dateComponents.day = day
+
+                if let date = calendar.date(from: dateComponents) {
+                    let dateString = dataManager.dateKey(from: date)
+                    let dayData = dataManager.allData[dateString] ?? [:]
+                    let isActive = dayData[activityIndex] == true
+
+                    let cell = GTLRSheets_CellData()
+
+                    if isActive {
+                        cell.userEnteredValue = GTLRSheets_ExtendedValue()
+                        cell.userEnteredValue?.stringValue = "✓"
+
+                        // Apply background color
+                        let format = GTLRSheets_CellFormat()
+                        let bgColor = GTLRSheets_Color()
+
+                        let uiColor = UIColor(activity.color)
+                        var red: CGFloat = 0
+                        var green: CGFloat = 0
+                        var blue: CGFloat = 0
+                        var alpha: CGFloat = 0
+                        uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+
+                        bgColor.red = NSNumber(value: Float(red))
+                        bgColor.green = NSNumber(value: Float(green))
+                        bgColor.blue = NSNumber(value: Float(blue))
+
+                        format.backgroundColor = bgColor
+                        cell.userEnteredFormat = format
+                    }
+
+                    cells.append(cell)
+                }
+            }
+
+            row.values = cells
+            rowData.append(row)
+        }
+
+        // 4. Update cells request
+        let updateRequest = GTLRSheets_Request()
+        let updateCells = GTLRSheets_UpdateCellsRequest()
+        let gridRange = GTLRSheets_GridRange()
+        gridRange.sheetId = 0
+        gridRange.startRowIndex = 0
+        gridRange.startColumnIndex = 0
+        gridRange.endRowIndex = NSNumber(value: rowData.count)
+        gridRange.endColumnIndex = NSNumber(value: 366) // 1 label column + 365 days
+
+        updateCells.range = gridRange
+        updateCells.fields = "userEnteredValue,userEnteredFormat.backgroundColor"
+        updateCells.rows = rowData
+
+        updateRequest.updateCells = updateCells
+        requests.append(updateRequest)
+
+        // Execute batch update
+        let batchUpdate = GTLRSheets_BatchUpdateSpreadsheetRequest()
+        batchUpdate.requests = requests
+
+        let query = GTLRSheetsQuery_SpreadsheetsBatchUpdate.query(
+            withObject: batchUpdate,
+            spreadsheetId: spreadsheetId)
+
+        service.executeQuery(query) { [weak self] (ticket, result, error) in
+            DispatchQueue.main.async {
+                self?.isExporting = false
+
+                if let error = error {
+                    self?.exportStatus = "Error: \(error.localizedDescription)"
+                    completion(false, error.localizedDescription)
+                } else {
+                    self?.exportStatus = "Export complete!"
+                    self?.savedSpreadsheetId = spreadsheetId
+                    completion(true, "Successfully exported with colors!")
+                }
+            }
+        }
+    }
+
+    func getSpreadsheetUrl(id: String) -> String {
+        return "https://docs.google.com/spreadsheets/d/\(id)"
     }
 }
 
@@ -347,30 +684,16 @@ struct SnapButtonStyle: ButtonStyle {
 }
 
 struct ContentView: View {
-    let colors: [(name: String, color: Color)] = [
-        ("Exercise 🏋️‍♂️", .red),
-        ("Stretch 🤸‍♀️", .mint),
-        ("Food 🥦", .green),
-        ("Create 🛠️", .blue),
-        ("Work 💻", .teal),
-        ("Read 📚", .yellow),
-        ("Journal ✍️", .purple),
-        ("Meditate 🧘", .orange),
-        ("Music 🎵", .indigo),
-        ("Chores 🧹", .pink),
-        ("Sleep 💤", .cyan),
-        ("Leafless 🌿", .gray),
-        ("Sick 🤒", .brown)
-    ]
-    
+    @StateObject private var activitiesManager = ActivitiesManager()
+    @StateObject private var dataManager = LocalDataManager()
+
     @State private var selectedColor: Color = .red
     @State private var selectedDate = Date()
     @State private var showDatePicker = false
-    @StateObject private var dataManager = LocalDataManager()
-
     @State private var animatingButtons: Set<String> = []
     @State private var particleButtons: Set<String> = []
     @State private var showExportSheet = false
+    @State private var showSettingsSheet = false
 
     let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -378,12 +701,32 @@ struct ContentView: View {
         formatter.timeStyle = .none
         return formatter
     }()
-    
+
+    func needsDarkText(for color: Color) -> Bool {
+        let uiColor = UIColor(color)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+
+        // Calculate luminance
+        let luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+        return luminance > 0.6 // Use dark text for bright colors
+    }
+
     var body: some View {
         VStack {
-            // Settings/Export button in top-right
+            // Settings/Export buttons in top-right
             HStack {
                 Spacer()
+                Button(action: {
+                    showSettingsSheet = true
+                }) {
+                    Image(systemName: "gearshape")
+                        .imageScale(.large)
+                        .padding()
+                }
                 Button(action: {
                     showExportSheet = true
                 }) {
@@ -396,53 +739,50 @@ struct ContentView: View {
             ScrollView {
                     VStack(spacing: 10) {
                         Spacer()
-                            .frame(height: 20)
+                            .frame(height: 5)
 
-                        ForEach(colors.indices, id: \.self) { index in
-                            let colorItem = colors[index]
+                        ForEach(activitiesManager.activities.indices, id: \.self) { index in
+                            let activity = activitiesManager.activities[index]
                             HStack {
                                 Button(action: {
                                     withAnimation(.spring(response: 0.15, dampingFraction: 0.4)) {
-                                        animatingButtons.insert(colorItem.name)
-                                        particleButtons.insert(colorItem.name)
+                                        animatingButtons.insert(activity.name)
+                                        particleButtons.insert(activity.name)
                                     }
 
-                                    dataManager.updateCell(row: index, date: selectedDate, color: colorItem.color)
-                                    
+                                    dataManager.updateCell(row: index, date: selectedDate, color: activity.color)
+
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                        animatingButtons.remove(colorItem.name)
+                                        animatingButtons.remove(activity.name)
                                     }
                                 }) {
                                     HStack {
-                                        Text(colorItem.name)
-                                            .foregroundColor(colorItem.name == "Read 📚" || colorItem.name == "Sleep 💤" ||
-                                                colorItem.name == "Stretch 🤸‍♀️" ||
-                                                colorItem.name == "Work 💻" ?
-                                                .black : .white)
+                                        Text(activity.name)
+                                            .foregroundColor(needsDarkText(for: activity.color) ? .black : .white)
                                             .frame(maxWidth: .infinity)
                                     }
                                     .frame(height: 40)
                                     .frame(maxWidth: 250)
-                                    .background(colorItem.color)
+                                    .background(activity.color)
                                     .cornerRadius(8)
                                 }
                                 .buttonStyle(SnapButtonStyle(
-                                    color: colorItem.color,
+                                    color: activity.color,
                                     isAnimating: .init(
-                                        get: { particleButtons.contains(colorItem.name) },
+                                        get: { particleButtons.contains(activity.name) },
                                         set: { isAnimating in
                                             if !isAnimating {
-                                                particleButtons.remove(colorItem.name)
+                                                particleButtons.remove(activity.name)
                                             }
                                         }
                                     )
                                 ))
-                                .scaleEffect(animatingButtons.contains(colorItem.name) ? 1.05 : 1.0)
+                                .scaleEffect(animatingButtons.contains(activity.name) ? 1.05 : 1.0)
                                 
                                 // Add checkbox indicator
                                 CheckmarkView(
                                     index: index,
-                                    color: colorItem.color,
+                                    color: activity.color,
                                     isChecked: dataManager.cellStatuses[index] == true,
                                     date: selectedDate,
                                     dataManager: dataManager
@@ -456,7 +796,7 @@ struct ContentView: View {
 
                 YearGridView(yearData: dataManager.yearData,
                              selectedDate: selectedDate,
-                             colors: colors)
+                             activities: activitiesManager.activities)
                     .padding(.horizontal)
             
                 let calendar = Calendar.current
@@ -495,52 +835,203 @@ struct ContentView: View {
         }
         .onChange(of: selectedDate) { oldValue, newValue in
             // Fetch cell statuses whenever date changes
-            dataManager.fetchCellStatus(date: newValue)
+            dataManager.fetchCellStatus(date: newValue, activitiesCount: activitiesManager.activities.count)
+        }
+        .onChange(of: activitiesManager.activities.count) { oldValue, newValue in
+            // Refresh data when activities change
+            dataManager.fetchYearData(activitiesCount: newValue)
+            dataManager.fetchCellStatus(date: selectedDate, activitiesCount: newValue)
         }
         .onAppear {
-            dataManager.fetchCellStatus(date: selectedDate)
+            dataManager.fetchCellStatus(date: selectedDate, activitiesCount: activitiesManager.activities.count)
+            dataManager.fetchYearData(activitiesCount: activitiesManager.activities.count)
         }
         .sheet(isPresented: $showExportSheet) {
-            ExportView(dataManager: dataManager)
+            ExportView(dataManager: dataManager, activitiesManager: activitiesManager)
+        }
+        .sheet(isPresented: $showSettingsSheet) {
+            SettingsView(activitiesManager: activitiesManager)
         }
     }
 }
 
 struct ExportView: View {
     @ObservedObject var dataManager: LocalDataManager
+    @ObservedObject var activitiesManager: ActivitiesManager
     @Environment(\.dismiss) var dismiss
     @State private var showShareSheet = false
     @State private var fileURL: URL?
+    @StateObject private var sheetsExporter = GoogleSheetsExporter()
+    @State private var spreadsheetId: String = ""
+    @State private var showAlert = false
+    @State private var alertMessage = ""
+    @State private var createdSheetUrl: String?
 
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
-                Text("Export Your Data")
-                    .font(.title)
-                    .padding()
+            ScrollView {
+                VStack(spacing: 20) {
+                    Text("Export Your Data")
+                        .font(.title)
+                        .padding()
 
-                Button(action: {
-                    exportToFile()
-                }) {
-                    HStack {
-                        Image(systemName: "doc.text")
-                        Text("Export to CSV")
+                    // CSV Export Section
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("CSV Export")
+                            .font(.headline)
+                            .padding(.horizontal)
+
+                        Button(action: {
+                            exportToFile()
+                        }) {
+                            HStack {
+                                Image(systemName: "doc.text")
+                                Text("Export to CSV")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        .padding(.horizontal)
+
+                        Text("Plain text file - no colors")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+
+                    Divider()
+                        .padding(.vertical)
+
+                    // Google Sheets Export Section
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Google Sheets Export (with Colors!)")
+                            .font(.headline)
+                            .padding(.horizontal)
+
+                        if !sheetsExporter.isSignedIn {
+                            Button(action: {
+                                sheetsExporter.signIn { success in
+                                    if !success {
+                                        alertMessage = "Failed to sign in to Google"
+                                        showAlert = true
+                                    }
+                                }
+                            }) {
+                                HStack {
+                                    Image(systemName: "person.circle")
+                                    Text("Sign in with Google")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                            }
+                            .padding(.horizontal)
+                        } else {
+                            // Create new spreadsheet
+                            Button(action: {
+                                sheetsExporter.createNewSpreadsheet { success, id in
+                                    if success, let spreadsheetId = id {
+                                        // Now export to the newly created sheet
+                                        sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: spreadsheetId) { exportSuccess, message in
+                                            if exportSuccess {
+                                                createdSheetUrl = sheetsExporter.getSpreadsheetUrl(id: spreadsheetId)
+                                                alertMessage = "Created and exported!\n\nOpen in Google Sheets?"
+                                                showAlert = true
+                                            } else {
+                                                alertMessage = message
+                                                showAlert = true
+                                            }
+                                        }
+                                    } else {
+                                        alertMessage = "Failed to create spreadsheet"
+                                        showAlert = true
+                                    }
+                                }
+                            }) {
+                                HStack {
+                                    if sheetsExporter.isExporting {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                            .padding(.trailing, 5)
+                                    }
+                                    Image(systemName: "plus.circle")
+                                    Text(sheetsExporter.isExporting ? sheetsExporter.exportStatus : "Create New Sheet")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(sheetsExporter.isExporting ? Color.gray : Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                            }
+                            .disabled(sheetsExporter.isExporting)
+                            .padding(.horizontal)
+
+                            Text("or")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5)
+
+                            // Export to existing spreadsheet
+                            VStack(spacing: 10) {
+                                TextField("Paste Google Sheets URL or ID", text: $spreadsheetId)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .autocapitalization(.none)
+                                    .padding(.horizontal)
+
+                                if let savedId = sheetsExporter.savedSpreadsheetId, spreadsheetId.isEmpty {
+                                    Button(action: {
+                                        spreadsheetId = savedId
+                                    }) {
+                                        Text("Use last sheet: \(savedId.prefix(10))...")
+                                            .font(.caption)
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+
+                                Button(action: {
+                                    let extractedId = extractSpreadsheetId(from: spreadsheetId)
+                                    sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: extractedId) { success, message in
+                                        alertMessage = message
+                                        showAlert = true
+                                        if success {
+                                            createdSheetUrl = sheetsExporter.getSpreadsheetUrl(id: extractedId)
+                                        }
+                                    }
+                                }) {
+                                    HStack {
+                                        if sheetsExporter.isExporting {
+                                            ProgressView()
+                                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                                .padding(.trailing, 5)
+                                        }
+                                        Image(systemName: "arrow.up.doc")
+                                        Text(sheetsExporter.isExporting ? sheetsExporter.exportStatus : "Export to This Sheet")
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(spreadsheetId.isEmpty || sheetsExporter.isExporting ? Color.gray : Color.orange)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                                }
+                                .disabled(spreadsheetId.isEmpty || sheetsExporter.isExporting)
+                                .padding(.horizontal)
+                            }
+
+                            Text("Exports all 365 days with colored streaks!")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal)
+                        }
+                    }
+
+                    Spacer()
                 }
-                .padding(.horizontal)
-
-                Text("CSV files can be opened in Excel, Numbers, or imported into Google Sheets")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-
-                Spacer()
             }
             .navigationBarItems(trailing: Button("Done") {
                 dismiss()
@@ -551,10 +1042,25 @@ struct ExportView: View {
                 ShareSheet(items: [url])
             }
         }
+        .alert(alertMessage, isPresented: $showAlert) {
+            if let url = createdSheetUrl {
+                Button("Open Sheet") {
+                    if let sheetURL = URL(string: url) {
+                        UIApplication.shared.open(sheetURL)
+                    }
+                    createdSheetUrl = nil
+                }
+                Button("OK", role: .cancel) {
+                    createdSheetUrl = nil
+                }
+            } else {
+                Button("OK", role: .cancel) { }
+            }
+        }
     }
 
     private func exportToFile() {
-        let csvString = dataManager.exportToCSV()
+        let csvString = dataManager.exportToCSV(activities: activitiesManager.activities)
 
         // Create a temporary file
         let fileName = "colorjournal_export_\(Date().timeIntervalSince1970).csv"
@@ -566,6 +1072,165 @@ struct ExportView: View {
             showShareSheet = true
         } catch {
             print("Error writing CSV file: \(error)")
+        }
+    }
+
+    private func extractSpreadsheetId(from input: String) -> String {
+        // Handle full URL: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit...
+        if input.contains("docs.google.com/spreadsheets") {
+            let components = input.components(separatedBy: "/")
+            if let dIndex = components.firstIndex(of: "d"), dIndex + 1 < components.count {
+                return components[dIndex + 1]
+            }
+        }
+        // Otherwise assume it's just the ID
+        return input.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var activitiesManager: ActivitiesManager
+    @Environment(\.dismiss) var dismiss
+    @State private var editingActivity: Activity?
+    @State private var showingEditSheet = false
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(activitiesManager.activities) { activity in
+                    HStack {
+                        Circle()
+                            .fill(activity.color)
+                            .frame(width: 30, height: 30)
+
+                        Text(activity.name)
+
+                        Spacer()
+
+                        Button(action: {
+                            editingActivity = activity
+                            showingEditSheet = true
+                        }) {
+                            Image(systemName: "pencil")
+                                .foregroundColor(.blue)
+                        }
+                        .buttonStyle(BorderlessButtonStyle())
+
+                        Button(action: {
+                            if let index = activitiesManager.activities.firstIndex(where: { $0.id == activity.id }) {
+                                activitiesManager.deleteActivity(at: index)
+                            }
+                        }) {
+                            Image(systemName: "trash")
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(BorderlessButtonStyle())
+                    }
+                }
+                .onDelete { indexSet in
+                    indexSet.sorted(by: >).forEach { activitiesManager.deleteActivity(at: $0) }
+                }
+                .onMove { from, to in
+                    activitiesManager.moveActivity(from: from, to: to)
+                }
+
+                Button(action: {
+                    let newActivity = Activity(name: "New Activity", color: Color(red: 0.6, green: 0.6, blue: 0.6))
+                    activitiesManager.addActivity(newActivity)
+
+                    // Delay to ensure the activity is added and view is updated
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        editingActivity = newActivity
+                        showingEditSheet = true
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "plus.circle.fill")
+                        Text("Add Activity")
+                    }
+                }
+            }
+            .navigationTitle("Edit Activities")
+            .navigationBarItems(
+                leading: EditButton(),
+                trailing: Button("Done") {
+                    dismiss()
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditSheet) {
+            if let activity = editingActivity {
+                ActivityEditView(
+                    activitiesManager: activitiesManager,
+                    activity: activity
+                )
+            }
+        }
+    }
+}
+
+struct ActivityEditView: View {
+    @ObservedObject var activitiesManager: ActivitiesManager
+    @State var activity: Activity
+    @Environment(\.dismiss) var dismiss
+
+    let availableColors: [(name: String, color: Color)] = [
+        ("Red", Color(red: 1.0, green: 0.2, blue: 0.2)),
+        ("Orange", Color(red: 1.0, green: 0.6, blue: 0.0)),
+        ("Yellow", Color(red: 1.0, green: 0.9, blue: 0.0)),
+        ("Green", Color(red: 0.2, green: 0.8, blue: 0.2)),
+        ("Mint", Color(red: 0.6, green: 0.95, blue: 0.8)),
+        ("Teal", Color(red: 0.2, green: 0.7, blue: 0.7)),
+        ("Cyan", Color(red: 0.2, green: 0.8, blue: 1.0)),
+        ("Blue", Color(red: 0.2, green: 0.4, blue: 1.0)),
+        ("Indigo", Color(red: 0.3, green: 0.2, blue: 0.8)),
+        ("Purple", Color(red: 0.7, green: 0.3, blue: 0.9)),
+        ("Pink", Color(red: 1.0, green: 0.4, blue: 0.7)),
+        ("Brown", Color(red: 0.6, green: 0.4, blue: 0.2)),
+        ("Gray", Color(red: 0.6, green: 0.6, blue: 0.6))
+    ]
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Activity Name") {
+                    TextField("Name", text: $activity.name)
+                }
+
+                Section("Color") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 50))], spacing: 15) {
+                        ForEach(availableColors, id: \.name) { colorOption in
+                            Circle()
+                                .fill(colorOption.color)
+                                .frame(width: 50, height: 50)
+                                .overlay(
+                                    Circle()
+                                        .stroke(activity.colorHex == colorOption.color.toHex() ? Color.white : Color.clear, lineWidth: 3)
+                                )
+                                .onTapGesture {
+                                    activity.colorHex = colorOption.color.toHex()
+                                }
+                        }
+                    }
+                    .padding(.vertical)
+                }
+            }
+            .navigationTitle("Edit Activity")
+            .navigationBarItems(
+                leading: Button("Cancel") {
+                    dismiss()
+                },
+                trailing: Button("Save") {
+                    if let index = activitiesManager.activities.firstIndex(where: { $0.id == activity.id }) {
+                        activitiesManager.updateActivity(
+                            at: index,
+                            name: activity.name,
+                            color: Color(hex: activity.colorHex)
+                        )
+                    }
+                    dismiss()
+                }
+            )
         }
     }
 }
@@ -602,15 +1267,39 @@ extension UIColor {
 }
 
 extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (255, 0, 0, 0)
+        }
+        self.init(
+            .sRGB,
+            red: Double(r) / 255,
+            green: Double(g) / 255,
+            blue: Double(b) / 255,
+            opacity: Double(a) / 255
+        )
+    }
+
     func toHex() -> String {
         let uiColor = UIColor(self)
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
         var alpha: CGFloat = 0
-        
+
         uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        
+
         return String(
             format: "#%02X%02X%02X",
             Int(red * 255),
