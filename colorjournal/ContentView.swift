@@ -200,15 +200,25 @@ class LocalDataManager: ObservableObject {
     func exportToCSV() -> String {
         var csv = "Date," + AppConfig.colors.map { $0.name }.joined(separator: ",") + "\n"
 
-        let sortedDates = allData.keys.sorted()
-        for dateString in sortedDates {
-            let dayData = allData[dateString] ?? [:]
-            var row = [dateString]
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
 
-            for index in 0..<AppConfig.colors.count {
-                row.append(dayData[index] == true ? "✓" : "")
+        // Generate CSV for all 365 days of the current year
+        for day in 1...365 {
+            var dateComponents = DateComponents()
+            dateComponents.year = year
+            dateComponents.day = day
+
+            if let date = calendar.date(from: dateComponents) {
+                let dateString = dateKey(from: date)
+                let dayData = allData[dateString] ?? [:]
+                var row = [dateString]
+
+                for index in 0..<AppConfig.colors.count {
+                    row.append(dayData[index] == true ? "✓" : "")
+                }
+                csv += row.joined(separator: ",") + "\n"
             }
-            csv += row.joined(separator: ",") + "\n"
         }
 
         return csv
@@ -482,14 +492,6 @@ struct ContentView: View {
                     }
                     .padding()
                 }
-
-            Button(action: {
-                showExportSheet = true
-            }) {
-                Text("Export Data")
-                    .foregroundColor(.primary)
-                    .padding()
-            }
         }
         .onChange(of: selectedDate) { oldValue, newValue in
             // Fetch cell statuses whenever date changes
@@ -508,7 +510,7 @@ struct ExportView: View {
     @ObservedObject var dataManager: LocalDataManager
     @Environment(\.dismiss) var dismiss
     @State private var showShareSheet = false
-    @State private var csvData: String = ""
+    @State private var fileURL: URL?
 
     var body: some View {
         NavigationView {
@@ -518,8 +520,7 @@ struct ExportView: View {
                     .padding()
 
                 Button(action: {
-                    csvData = dataManager.exportToCSV()
-                    showShareSheet = true
+                    exportToFile()
                 }) {
                     HStack {
                         Image(systemName: "doc.text")
@@ -546,7 +547,25 @@ struct ExportView: View {
             })
         }
         .sheet(isPresented: $showShareSheet) {
-            ShareSheet(items: [csvData])
+            if let url = fileURL {
+                ShareSheet(items: [url])
+            }
+        }
+    }
+
+    private func exportToFile() {
+        let csvString = dataManager.exportToCSV()
+
+        // Create a temporary file
+        let fileName = "colorjournal_export_\(Date().timeIntervalSince1970).csv"
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+
+        do {
+            try csvString.write(to: tempURL, atomically: true, encoding: .utf8)
+            fileURL = tempURL
+            showShareSheet = true
+        } catch {
+            print("Error writing CSV file: \(error)")
         }
     }
 }
