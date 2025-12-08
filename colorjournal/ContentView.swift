@@ -1,11 +1,7 @@
 import SwiftUI
-import GoogleSignIn
-import GoogleAPIClientForREST
-import GTMSessionFetcher
 
 // Configuration struct
-struct GoogleConfig {
-    static let spreadsheetId = "1DZKts9E4dQ51ShJbN_jxWCvi87QZK3UUgcKB8ch08LI"
+struct AppConfig {
     static let colors: [(name: String, color: Color)] = [
         ("Exercise 🏋️‍♂️", .red),
         ("Stretch 🤸‍♀️", .mint),
@@ -27,288 +23,195 @@ struct YearGridView: View {
     let yearData: [Int: [Bool]]  // Day number -> array of activity statuses
     let selectedDate: Date
     let colors: [(name: String, color: Color)]
-    
+
     private func getDayOfYear(_ date: Date) -> Int {
         let calendar = Calendar.current
         let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
         return calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
     }
-    
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(1...365, id: \.self) { day in
-                    VStack(spacing: 1) {
-                        ForEach(colors.indices, id: \.self) { index in
-                            let isColored = yearData[day]?[index] ?? false
-                            Rectangle()
-                                .fill(isColored ? colors[index].color : Color.black)
-                                .frame(width: 3, height: 3)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(1...365, id: \.self) { day in
+                        VStack(spacing: 1) {
+                            ForEach(colors.indices, id: \.self) { index in
+                                let isColored = yearData[day]?[index] ?? false
+                                Rectangle()
+                                    .fill(isColored ? colors[index].color : Color.black)
+                                    .frame(width: 3, height: 3)
+                            }
                         }
+                        .overlay(
+                            Rectangle()
+                                .stroke(day == getDayOfYear(selectedDate) ? Color.white : Color.clear, lineWidth: 1)
+                        )
+                        .id(day)
                     }
-                    .overlay(
-                        Rectangle()
-                            .stroke(day == getDayOfYear(selectedDate) ? Color.white : Color.clear, lineWidth: 1)
-                    )
+                }
+                .padding(.vertical)
+            }
+            .frame(height: 50)
+            .onAppear {
+                // Scroll to current day, centered
+                let currentDay = getDayOfYear(Date())
+                proxy.scrollTo(currentDay, anchor: .center)
+            }
+            .onChange(of: selectedDate) { oldValue, newValue in
+                // Scroll to selected day when date changes
+                let selectedDay = getDayOfYear(newValue)
+                withAnimation {
+                    proxy.scrollTo(selectedDay, anchor: .center)
                 }
             }
-            .padding(.vertical)
         }
-        .frame(height: 50)
     }
 }
 
 
-class GoogleSheetsManager: ObservableObject {
-    private var service: GTLRSheetsService?
-    @Published var isSignedIn = false
+class LocalDataManager: ObservableObject {
     @Published var cellStatuses: [Int: Bool] = [:] // Track colored status for each row
     @Published var yearData: [Int: [Bool]] = [:] // Day -> Array of activity statuses
-    
+
+    private let defaults = UserDefaults.standard
+    private let dataKey = "activityData"
+
+    // Data structure: [dateString: [activityIndex: true/false]]
+    private var allData: [String: [Int: Bool]] = [:]
+
     init() {
-        GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
-            if let user = user {
-                self?.setupSheetsService(user: user)
-                self?.isSignedIn = true
-                // Fetch initial status after successful sign-in restoration
-                DispatchQueue.main.async {
-                    self?.fetchCellStatus(date: Date())
-                    self?.fetchYearData()
-                }
-            }
+        loadData()
+        fetchYearData()
+    }
+
+    private func dateKey(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private func loadData() {
+        if let data = defaults.data(forKey: dataKey),
+           let decoded = try? JSONDecoder().decode([String: [Int: Bool]].self, from: data) {
+            allData = decoded
         }
     }
-    
-    private func setupSheetsService(user: GIDGoogleUser) {
-        let service = GTLRSheetsService()
-        service.authorizer = user.fetcherAuthorizer
-        self.service = service
-    }
-    
-    func signIn() {
-        guard let presentingViewController = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.rootViewController else { return }
-        
-        GIDSignIn.sharedInstance.signIn(
-            withPresenting: presentingViewController,
-            hint: nil,
-            additionalScopes: ["https://www.googleapis.com/auth/spreadsheets"]
-        ) { [weak self] result, error in
-            if let user = result?.user {
-                self?.setupSheetsService(user: user)
-                self?.isSignedIn = true
-                self?.fetchYearData() // Fetch year data after sign in
-            }
+
+    private func saveData() {
+        if let encoded = try? JSONEncoder().encode(allData) {
+            defaults.set(encoded, forKey: dataKey)
         }
     }
-    
+
     func fetchYearData() {
-        let query = GTLRSheetsQuery_SpreadsheetsGet.query(
-            withSpreadsheetId: GoogleConfig.spreadsheetId)
-        
-        // Get all columns for every day
-        query.ranges = ["R2C2:R14C366"] // From Jan 1 (col 2) to Dec 31 (col 366)
-        query.fields = "sheets.data.rowData.values.userEnteredFormat.backgroundColor"
-        
-        service?.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
-                var newYearData: [Int: [Bool]] = [:]
-                
-                if let sheet = (result as? GTLRSheets_Spreadsheet)?.sheets?.first,
-                   let rowData = sheet.data?.first?.rowData {
-                    // For each row (activity)
-                    for (rowIndex, row) in rowData.enumerated() {
-                        // For each column (day)
-                        if let cells = row.values {
-                            for (colIndex, cell) in cells.enumerated() {
-                                let dayNumber = colIndex + 1
-                                if newYearData[dayNumber] == nil {
-                                    newYearData[dayNumber] = Array(repeating: false, count: GoogleConfig.colors.count)
-                                }
-                                
-                                if let backgroundColor = cell.userEnteredFormat?.backgroundColor,
-                                   (backgroundColor.red?.floatValue ?? 0 > 0 ||
-                                    backgroundColor.green?.floatValue ?? 0 > 0 ||
-                                    backgroundColor.blue?.floatValue ?? 0 > 0) {
-                                    newYearData[dayNumber]?[rowIndex] = true
-                                }
-                            }
-                        }
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
+        var newYearData: [Int: [Bool]] = [:]
+
+        // Build year data from stored data
+        for day in 1...365 {
+            var dateComponents = DateComponents()
+            dateComponents.year = year
+            dateComponents.day = day
+
+            if let date = calendar.date(from: dateComponents) {
+                let key = dateKey(from: date)
+                let dayActivities = allData[key] ?? [:]
+
+                var activitiesArray = Array(repeating: false, count: AppConfig.colors.count)
+                for (index, isActive) in dayActivities {
+                    if index < activitiesArray.count {
+                        activitiesArray[index] = isActive
                     }
                 }
-                
-                self?.yearData = newYearData
+                newYearData[day] = activitiesArray
             }
         }
+
+        DispatchQueue.main.async {
+            self.yearData = newYearData
+        }
     }
-    
+
     func fetchCellStatus(date: Date) {
-        let calendar = Calendar.current
-        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
-        let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
-        
-        // Add 1 to dayOfYear to account for label column
-        let column = dayOfYear + 1
-        
-        // Instead of getting values first, directly get the formatting
-        let query = GTLRSheetsQuery_SpreadsheetsGet.query(
-            withSpreadsheetId: GoogleConfig.spreadsheetId)
-        
-        // Get the entire column for the day
-        query.ranges = ["R2C\(column):R14C\(column)"]
-        query.fields = "sheets.data.rowData.values.userEnteredFormat.backgroundColor"
-        
-        service?.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
-                // Reset current statuses
-                self?.cellStatuses.removeAll()
-                
-                if let sheet = (result as? GTLRSheets_Spreadsheet)?.sheets?.first,
-                   let rowData = sheet.data?.first?.rowData {
-                    // Process each row
-                    for (index, row) in rowData.enumerated() {
-                        if let cell = row.values?.first,
-                           let backgroundColor = cell.userEnteredFormat?.backgroundColor,
-                           // Check if any color component is non-zero
-                           (backgroundColor.red?.floatValue ?? 0 > 0 ||
-                            backgroundColor.green?.floatValue ?? 0 > 0 ||
-                            backgroundColor.blue?.floatValue ?? 0 > 0) {
-                            self?.cellStatuses[index] = true
-                        } else {
-                            self?.cellStatuses[index] = false
-                        }
-                    }
-                }
+        let key = dateKey(from: date)
+        let dayData = allData[key] ?? [:]
+
+        DispatchQueue.main.async {
+            self.cellStatuses.removeAll()
+            for index in 0..<AppConfig.colors.count {
+                self.cellStatuses[index] = dayData[index] ?? false
             }
         }
     }
-    
+
     func updateCell(row: Int, date: Date, color: Color) {
-        let calendar = Calendar.current
-        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
-        let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
-        
-        // Column 1 is reserved for labels, and we're 0-based
-        let col = dayOfYear
-        
-        let range = GTLRSheets_GridRange()
-        // Add 1 to row to account for header row, and since we're 0-based
-        range.startRowIndex = NSNumber(value: row + 1)
-        range.endRowIndex = NSNumber(value: row + 2)
-        range.startColumnIndex = NSNumber(value: col)
-        range.endColumnIndex = NSNumber(value: col + 1)
-        range.sheetId = NSNumber(value: 0)
-        
-        let cellFormat = GTLRSheets_CellFormat()
-        let backgroundColor = GTLRSheets_Color()
-        
-        let uiColor = UIColor(hex: color.toHex())
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
-        uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        
-        backgroundColor.red = NSNumber(value: Float(red))
-        backgroundColor.green = NSNumber(value: Float(green))
-        backgroundColor.blue = NSNumber(value: Float(blue))
-        
-        cellFormat.backgroundColor = backgroundColor
-        
-        let request = GTLRSheets_Request()
-        let repeatCell = GTLRSheets_RepeatCellRequest()
-        repeatCell.range = range
-        
-        let cell = GTLRSheets_CellData()
-        cell.userEnteredFormat = cellFormat
-        repeatCell.cell = cell
-        
-        repeatCell.fields = "userEnteredFormat.backgroundColor"
-        
-        request.repeatCell = repeatCell
-        
-        let batchUpdate = GTLRSheets_BatchUpdateSpreadsheetRequest()
-        batchUpdate.requests = [request]
-        
-        let query = GTLRSheetsQuery_SpreadsheetsBatchUpdate.query(
-            withObject: batchUpdate,
-            spreadsheetId: GoogleConfig.spreadsheetId)
+        let key = dateKey(from: date)
 
-        service?.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
-                if error == nil {
-                    // Update both local states after successful update
-                    self?.cellStatuses[row] = true
-                    
-                    // Update yearData for this day and activity
-                    let calendar = Calendar.current
-                    let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
-                    let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
-                    
-                    // Create the array if it doesn't exist for this day
-                    if self?.yearData[dayOfYear] == nil {
-                        self?.yearData[dayOfYear] = Array(repeating: false, count: GoogleConfig.colors.count)
-                    }
-                    
-                    // Update the specific activity for this day
-                    self?.yearData[dayOfYear]?[row] = true
-                }
+        if allData[key] == nil {
+            allData[key] = [:]
+        }
+        allData[key]?[row] = true
+
+        saveData()
+
+        // Update local states
+        DispatchQueue.main.async {
+            self.cellStatuses[row] = true
+
+            // Update yearData
+            let calendar = Calendar.current
+            let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
+            let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
+
+            if self.yearData[dayOfYear] == nil {
+                self.yearData[dayOfYear] = Array(repeating: false, count: AppConfig.colors.count)
+            }
+            self.yearData[dayOfYear]?[row] = true
+        }
+    }
+
+    func clearCell(row: Int, date: Date) {
+        let key = dateKey(from: date)
+
+        if allData[key] != nil {
+            allData[key]?[row] = false
+        }
+
+        saveData()
+
+        // Update local states
+        DispatchQueue.main.async {
+            self.cellStatuses[row] = false
+
+            // Update yearData
+            let calendar = Calendar.current
+            let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
+            let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
+
+            if self.yearData[dayOfYear] != nil {
+                self.yearData[dayOfYear]?[row] = false
             }
         }
     }
-    
-    func clearCell(row: Int, date: Date) {
-        let calendar = Calendar.current
-        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
-        let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
-        
-        // Column 1 is reserved for labels, and we're 0-based
-        let col = dayOfYear
-        
-        let range = GTLRSheets_GridRange()
-        // Add 1 to row to account for header row, and since we're 0-based
-        range.startRowIndex = NSNumber(value: row + 1)
-        range.endRowIndex = NSNumber(value: row + 2)
-        range.startColumnIndex = NSNumber(value: col)
-        range.endColumnIndex = NSNumber(value: col + 1)
-        range.sheetId = NSNumber(value: 0)
-        
-        // Create a "clear formatting" request
-        let request = GTLRSheets_Request()
-        let repeatCell = GTLRSheets_RepeatCellRequest()
-        repeatCell.range = range
-        
-        // Create an empty cell format (this effectively clears the formatting)
-        let cell = GTLRSheets_CellData()
-        let format = GTLRSheets_CellFormat()
-        format.backgroundColor = nil
-        cell.userEnteredFormat = format
-        repeatCell.cell = cell
-        
-        // Specify we want to update the background color
-        repeatCell.fields = "userEnteredFormat.backgroundColor"
-        
-        request.repeatCell = repeatCell
-        
-        let batchUpdate = GTLRSheets_BatchUpdateSpreadsheetRequest()
-        batchUpdate.requests = [request]
-        
-        let query = GTLRSheetsQuery_SpreadsheetsBatchUpdate.query(
-            withObject: batchUpdate,
-            spreadsheetId: GoogleConfig.spreadsheetId)
 
-        service?.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
-                if error == nil {
-                    // Update both local states after successful clear
-                    self?.cellStatuses[row] = false
-                    
-                    // Update yearData for this day and activity
-                    if let yearData = self?.yearData[dayOfYear] {
-                        self?.yearData[dayOfYear]?[row] = false
-                    }
-                }
+    // Export functionality
+    func exportToCSV() -> String {
+        var csv = "Date," + AppConfig.colors.map { $0.name }.joined(separator: ",") + "\n"
+
+        let sortedDates = allData.keys.sorted()
+        for dateString in sortedDates {
+            let dayData = allData[dateString] ?? [:]
+            var row = [dateString]
+
+            for index in 0..<AppConfig.colors.count {
+                row.append(dayData[index] == true ? "✓" : "")
             }
+            csv += row.joined(separator: ",") + "\n"
         }
+
+        return csv
     }
 }
 
@@ -317,7 +220,7 @@ struct CheckmarkView: View {
     let color: Color
     let isChecked: Bool
     let date: Date
-    @ObservedObject var sheetsManager: GoogleSheetsManager
+    @ObservedObject var dataManager: LocalDataManager
     @State private var isLongPressing = false
     
     var body: some View {
@@ -328,7 +231,7 @@ struct CheckmarkView: View {
             .scaleEffect(isLongPressing ? 1.2 : 1.0)
             .onTapGesture {
                 if !isChecked {
-                    sheetsManager.updateCell(row: index, date: date, color: color)
+                    dataManager.updateCell(row: index, date: date, color: color)
                 }
             }
             .gesture(
@@ -338,8 +241,8 @@ struct CheckmarkView: View {
                             // Add haptic feedback
                             let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
                             impactFeedback.impactOccurred()
-                            
-                            sheetsManager.clearCell(row: index, date: date)
+
+                            dataManager.clearCell(row: index, date: date)
                         }
                     }
                     .simultaneously(with: DragGesture(minimumDistance: 0)
@@ -453,11 +356,11 @@ struct ContentView: View {
     @State private var selectedColor: Color = .red
     @State private var selectedDate = Date()
     @State private var showDatePicker = false
-    @StateObject private var sheetsManager = GoogleSheetsManager()
-    
+    @StateObject private var dataManager = LocalDataManager()
+
     @State private var animatingButtons: Set<String> = []
     @State private var particleButtons: Set<String> = []
-    @State private var isLoading = true
+    @State private var showExportSheet = false
 
     let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -468,16 +371,19 @@ struct ContentView: View {
     
     var body: some View {
         VStack {
-            if isLoading {
-                // Show nothing while loading
-                Color.clear
-            } else if !sheetsManager.isSignedIn {
-                Button("Sign in with Google") {
-                    sheetsManager.signIn()
+            // Settings/Export button in top-right
+            HStack {
+                Spacer()
+                Button(action: {
+                    showExportSheet = true
+                }) {
+                    Image(systemName: "square.and.arrow.up")
+                        .imageScale(.large)
+                        .padding()
                 }
-                .padding()
-            } else {
-                ScrollView {
+            }
+
+            ScrollView {
                     VStack(spacing: 10) {
                         Spacer()
                             .frame(height: 20)
@@ -490,8 +396,8 @@ struct ContentView: View {
                                         animatingButtons.insert(colorItem.name)
                                         particleButtons.insert(colorItem.name)
                                     }
-                                    
-                                    sheetsManager.updateCell(row: index, date: selectedDate, color: colorItem.color)
+
+                                    dataManager.updateCell(row: index, date: selectedDate, color: colorItem.color)
                                     
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                                         animatingButtons.remove(colorItem.name)
@@ -527,20 +433,21 @@ struct ContentView: View {
                                 CheckmarkView(
                                     index: index,
                                     color: colorItem.color,
-                                    isChecked: sheetsManager.cellStatuses[index] == true,
+                                    isChecked: dataManager.cellStatuses[index] == true,
                                     date: selectedDate,
-                                    sheetsManager: sheetsManager
+                                    dataManager: dataManager
                                 )
                             }
                         }
                     }
                     .padding(.horizontal)
                 }
-                
-                YearGridView(yearData: sheetsManager.yearData,
-                                                   selectedDate: selectedDate,
-                                                   colors: colors)
-                                            .padding(.horizontal)
+
+
+                YearGridView(yearData: dataManager.yearData,
+                             selectedDate: selectedDate,
+                             colors: colors)
+                    .padding(.horizontal)
             
                 let calendar = Calendar.current
                 let currentYear = calendar.component(.year, from: Date())
@@ -575,30 +482,84 @@ struct ContentView: View {
                     }
                     .padding()
                 }
+
+            Button(action: {
+                showExportSheet = true
+            }) {
+                Text("Export Data")
+                    .foregroundColor(.primary)
+                    .padding()
             }
         }
         .onChange(of: selectedDate) { oldValue, newValue in
             // Fetch cell statuses whenever date changes
-            sheetsManager.fetchCellStatus(date: newValue)
+            dataManager.fetchCellStatus(date: newValue)
         }
-        .onChange(of: sheetsManager.isSignedIn) { oldValue, newValue in
-            if newValue {
-                sheetsManager.fetchCellStatus(date: selectedDate)
-            }
-        }
-        // Fetch initial status when view appears
         .onAppear {
-            // Add a small delay before showing any UI
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                self.isLoading = false
-            }
-
-            if sheetsManager.isSignedIn {
-                sheetsManager.fetchCellStatus(date: selectedDate)
-                sheetsManager.fetchYearData()
-            }
+            dataManager.fetchCellStatus(date: selectedDate)
+        }
+        .sheet(isPresented: $showExportSheet) {
+            ExportView(dataManager: dataManager)
         }
     }
+}
+
+struct ExportView: View {
+    @ObservedObject var dataManager: LocalDataManager
+    @Environment(\.dismiss) var dismiss
+    @State private var showShareSheet = false
+    @State private var csvData: String = ""
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("Export Your Data")
+                    .font(.title)
+                    .padding()
+
+                Button(action: {
+                    csvData = dataManager.exportToCSV()
+                    showShareSheet = true
+                }) {
+                    HStack {
+                        Image(systemName: "doc.text")
+                        Text("Export to CSV")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .padding(.horizontal)
+
+                Text("CSV files can be opened in Excel, Numbers, or imported into Google Sheets")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
+                Spacer()
+            }
+            .navigationBarItems(trailing: Button("Done") {
+                dismiss()
+            })
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(items: [csvData])
+        }
+    }
+}
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 extension UIColor {
