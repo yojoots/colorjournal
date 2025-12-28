@@ -109,51 +109,294 @@ struct AppConfig {
     }
 }
 
+struct YearGridCell: View, Equatable {
+    let isColored: Bool
+    let color: Color
+    let cellSize: CGFloat
+
+    static func == (lhs: YearGridCell, rhs: YearGridCell) -> Bool {
+        lhs.isColored == rhs.isColored &&
+        lhs.cellSize == rhs.cellSize &&
+        lhs.color.description == rhs.color.description
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(isColored ? color : Color.black)
+            .frame(width: cellSize, height: cellSize)
+    }
+}
+
+// Optimized day column using Canvas for fast rendering
+struct DayColumnView: View {
+    let day: Int
+    let dayData: [Bool]
+    let activities: [Activity]
+    let cellSize: CGFloat
+    let cellSpacing: CGFloat
+    let isSelected: Bool
+    let highlightPadding: CGFloat
+    let strokeWidth: CGFloat
+    let isEditMode: Bool
+    let showGridLines: Bool
+    let onCellTap: ((Int, Int) -> Void)?
+
+    private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
+
+    var body: some View {
+        Canvas { context, size in
+            let totalCellHeight = cellSize + cellSpacing
+            let yOffset = gridPadding
+
+            // Draw cells
+            for index in activities.indices {
+                let isColored = index < dayData.count ? dayData[index] : false
+                let y = CGFloat(index) * totalCellHeight + yOffset
+                let rect = CGRect(x: 0, y: y, width: cellSize, height: cellSize)
+                let color = isColored ? activities[index].color : Color.black
+                context.fill(Path(rect), with: .color(color))
+            }
+
+            // Draw grid lines if enabled
+            if showGridLines {
+                let gridColor = Color.white.opacity(0.15)
+
+                // Horizontal lines between each cell
+                for i in 0...activities.count {
+                    let y = CGFloat(i) * totalCellHeight - cellSpacing / 2 + yOffset
+                    var path = Path()
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: cellSize, y: y))
+                    context.stroke(path, with: .color(gridColor), lineWidth: 1)
+                }
+
+                // Vertical lines on left and right edges
+                var leftPath = Path()
+                leftPath.move(to: CGPoint(x: 0, y: 0))
+                leftPath.addLine(to: CGPoint(x: 0, y: size.height))
+                context.stroke(leftPath, with: .color(gridColor), lineWidth: 1)
+            }
+        }
+        .frame(width: cellSize, height: CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2)
+        .padding(isSelected ? highlightPadding : 0)
+        .overlay(
+            Rectangle()
+                .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: strokeWidth)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { location in
+            if isEditMode, let onCellTap = onCellTap {
+                let index = Int(location.y / (cellSize + cellSpacing))
+                if index >= 0 && index < activities.count {
+                    onCellTap(day, index)
+                }
+            }
+        }
+    }
+}
+
 struct YearGridView: View {
     let yearData: [Int: [Bool]]  // Day number -> array of activity statuses
     let selectedDate: Date
     let activities: [Activity]
+    var isExpanded: Bool = false
+    var isEditMode: Bool = false
+    var showGridLines: Bool = false
+    var onCellTap: ((Int, Int) -> Void)? = nil  // (dayOfYear, activityIndex)
 
-    private func getDayOfYear(_ date: Date) -> Int {
+    private var cellSize: CGFloat { isExpanded ? 16 : 3 }
+    private var cellSpacing: CGFloat { isExpanded ? 4 : 1 }
+    private var highlightPadding: CGFloat { isExpanded ? 1 : 1 }
+    private var strokeWidth: CGFloat { isExpanded ? 2 : 1 }
+
+    private var selectedDayOfYear: Int {
         let calendar = Calendar.current
-        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
-        return calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
+        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: selectedDate))!
+        return calendar.dateComponents([.day], from: startOfYear, to: selectedDate).day! + 1
     }
+
+    // Computed once, cached
+    private static let monthStartDaysCache: [Int: String] = {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
+        let monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        var result: [Int: String] = [:]
+
+        for month in 1...12 {
+            if let firstOfMonth = calendar.date(from: DateComponents(year: year, month: month, day: 1)),
+               let startOfYear = calendar.date(from: DateComponents(year: year, month: 1, day: 1)) {
+                let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: firstOfMonth).day! + 1
+                result[dayOfYear] = monthLabels[month - 1]
+            }
+        }
+        return result
+    }()
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
-                        VStack(spacing: 1) {
-                            ForEach(activities.indices, id: \.self) { index in
-                                let dayData = yearData[day] ?? []
-                                let isColored = index < dayData.count ? dayData[index] : false
-                                Rectangle()
-                                    .fill(isColored ? activities[index].color : Color.black)
-                                    .frame(width: 3, height: 3)
+                VStack(alignment: .leading, spacing: 4) {
+                    // Month markers (only in expanded mode)
+                    if isExpanded {
+                        LazyHStack(alignment: .top, spacing: 0) {
+                            ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
+                                if let label = Self.monthStartDaysCache[day] {
+                                    Text(label)
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                        .fixedSize()
+                                        .frame(width: cellSize, alignment: .leading)
+                                } else {
+                                    Color.clear
+                                        .frame(width: cellSize, height: 1)
+                                }
                             }
                         }
-                        .overlay(
-                            Rectangle()
-                                .stroke(day == getDayOfYear(selectedDate) ? Color.white : Color.clear, lineWidth: 1)
-                        )
-                        .id(day)
+                        .frame(height: 16)
                     }
+
+                    // Day grid
+                    let gridPadding: CGFloat = cellSpacing / 2 + 1
+                    let gridHeight = CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2
+                    LazyHStack(alignment: .top, spacing: 0) {
+                        ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
+                            let isSelected = day == selectedDayOfYear
+                            let dayData = yearData[day] ?? []
+                            DayColumnView(
+                                day: day,
+                                dayData: dayData,
+                                activities: activities,
+                                cellSize: cellSize,
+                                cellSpacing: cellSpacing,
+                                isSelected: isSelected,
+                                highlightPadding: highlightPadding,
+                                strokeWidth: strokeWidth,
+                                isEditMode: isEditMode,
+                                showGridLines: showGridLines,
+                                onCellTap: onCellTap
+                            )
+                            .id(day)
+                        }
+                    }
+                    .frame(height: gridHeight)
                 }
-                .padding(.vertical)
             }
-            .frame(height: 50)
+            .frame(height: isExpanded ? nil : 50)
             .onAppear {
                 // Scroll to current day, centered
-                let currentDay = getDayOfYear(Date())
-                proxy.scrollTo(currentDay, anchor: .center)
+                proxy.scrollTo(selectedDayOfYear, anchor: .center)
             }
             .onChange(of: selectedDate) { oldValue, newValue in
                 // Scroll to selected day when date changes
-                let selectedDay = getDayOfYear(newValue)
                 withAnimation {
-                    proxy.scrollTo(selectedDay, anchor: .center)
+                    proxy.scrollTo(selectedDayOfYear, anchor: .center)
+                }
+            }
+        }
+    }
+}
+
+struct ExpandedYearGridView: View {
+    @ObservedObject var dataManager: LocalDataManager
+    let selectedDate: Date
+    let activities: [Activity]
+    @Binding var isPresented: Bool
+    @State private var isEditMode: Bool = false
+    @State private var showGridLines: Bool = false
+
+    private func dateFromDayOfYear(_ dayOfYear: Int) -> Date {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date())
+        var dateComponents = DateComponents()
+        dateComponents.year = year
+        dateComponents.day = dayOfYear
+        return calendar.date(from: dateComponents) ?? Date()
+    }
+
+    private func toggleCell(dayOfYear: Int, activityIndex: Int) {
+        let date = dateFromDayOfYear(dayOfYear)
+        let dayData = dataManager.yearData[dayOfYear] ?? []
+        let isCurrentlyOn = activityIndex < dayData.count ? dayData[activityIndex] : false
+
+        if isCurrentlyOn {
+            dataManager.clearCell(row: activityIndex, date: date)
+        } else {
+            dataManager.updateCell(row: activityIndex, date: date, color: activities[activityIndex].color)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack {
+                HStack {
+                    Button(action: {
+                        withAnimation {
+                            isEditMode.toggle()
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: isEditMode ? "pencil.circle.fill" : "pencil.circle")
+                                .font(.title2)
+                            Text(isEditMode ? "Done" : "Edit")
+                                .font(.subheadline)
+                        }
+                        .foregroundColor(isEditMode ? .yellow : .gray)
+                    }
+                    .padding()
+
+                    Spacer()
+
+                    Button(action: {
+                        showGridLines.toggle()
+                    }) {
+                        Image(systemName: showGridLines ? "grid.circle.fill" : "grid.circle")
+                            .font(.title2)
+                            .foregroundColor(showGridLines ? .yellow : .gray)
+                    }
+                    .padding(.trailing, 8)
+
+                    Button(action: {
+                        withAnimation {
+                            isPresented = false
+                        }
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title)
+                            .foregroundColor(.gray)
+                    }
+                    .padding()
+                }
+
+                YearGridView(
+                    yearData: dataManager.yearData,
+                    selectedDate: selectedDate,
+                    activities: activities,
+                    isExpanded: true,
+                    isEditMode: isEditMode,
+                    showGridLines: showGridLines,
+                    onCellTap: { dayOfYear, activityIndex in
+                        toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.top, 16)
+
+                if isEditMode {
+                    Text("Tap cells to toggle")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .padding(.top, 8)
+                }
+
+                Spacer()
+            }
+        }
+        .onTapGesture {
+            if !isEditMode {
+                withAnimation {
+                    isPresented = false
                 }
             }
         }
@@ -200,6 +443,58 @@ class LocalDataManager: ObservableObject {
         defaults.removeObject(forKey: dataKey)
         cellStatuses.removeAll()
         yearData.removeAll()
+    }
+
+    /// Remaps stored activity data indices when activities are reordered.
+    /// This ensures streak data follows the activity when moved.
+    func remapIndices(from sourceIndices: IndexSet, to destination: Int, totalCount: Int) {
+        guard let sourceIndex = sourceIndices.first else { return }
+
+        // Calculate the actual destination index after removal
+        let actualDestination = sourceIndex < destination ? destination - 1 : destination
+
+        // Build the index mapping: oldIndex -> newIndex
+        var indexMap: [Int: Int] = [:]
+
+        for i in 0..<totalCount {
+            if i == sourceIndex {
+                // The moved item goes to its new position
+                indexMap[i] = actualDestination
+            } else if sourceIndex < actualDestination {
+                // Moving down: items between source and destination shift up
+                if i > sourceIndex && i <= actualDestination {
+                    indexMap[i] = i - 1
+                } else {
+                    indexMap[i] = i
+                }
+            } else {
+                // Moving up: items between destination and source shift down
+                if i >= actualDestination && i < sourceIndex {
+                    indexMap[i] = i + 1
+                } else {
+                    indexMap[i] = i
+                }
+            }
+        }
+
+        // Apply the mapping to all stored data
+        var newAllData: [String: [Int: Bool]] = [:]
+
+        for (dateKey, dayData) in allData {
+            var newDayData: [Int: Bool] = [:]
+            for (oldIndex, value) in dayData {
+                if let newIndex = indexMap[oldIndex] {
+                    newDayData[newIndex] = value
+                } else if oldIndex < totalCount {
+                    // Keep data at same index if not in map (shouldn't happen)
+                    newDayData[oldIndex] = value
+                }
+            }
+            newAllData[dateKey] = newDayData
+        }
+
+        allData = newAllData
+        saveData()
     }
 
     func fetchYearData(activitiesCount: Int = 13) {
@@ -632,7 +927,7 @@ struct CheckmarkView: View {
                 }
             }
             .gesture(
-                LongPressGesture(minimumDuration: 0.5)
+                LongPressGesture(minimumDuration: 0.25)
                     .onEnded { _ in
                         if isChecked {
                             // Add haptic feedback
@@ -744,6 +1039,7 @@ struct ContentView: View {
     @State private var particleButtons: Set<String> = []
     @State private var showExportSheet = false
     @State private var showSettingsSheet = false
+    @State private var showExpandedGrid = false
 
     let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -848,6 +1144,15 @@ struct ContentView: View {
                              selectedDate: selectedDate,
                              activities: activitiesManager.activities)
                     .padding(.horizontal)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        TapGesture()
+                            .onEnded {
+                                withAnimation {
+                                    showExpandedGrid = true
+                                }
+                            }
+                    )
             
                 let calendar = Calendar.current
                 let currentYear = calendar.component(.year, from: Date())
@@ -901,6 +1206,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettingsSheet) {
             SettingsView(activitiesManager: activitiesManager, dataManager: dataManager)
+        }
+        .fullScreenCover(isPresented: $showExpandedGrid) {
+            ExpandedYearGridView(
+                dataManager: dataManager,
+                selectedDate: selectedDate,
+                activities: activitiesManager.activities,
+                isPresented: $showExpandedGrid
+            )
         }
     }
 }
@@ -1183,7 +1496,11 @@ struct SettingsView: View {
                     indexSet.sorted(by: >).forEach { activitiesManager.deleteActivity(at: $0) }
                 }
                 .onMove { from, to in
+                    // Remap streak data indices before moving activities
+                    dataManager.remapIndices(from: from, to: to, totalCount: activitiesManager.activities.count)
                     activitiesManager.moveActivity(from: from, to: to)
+                    // Refresh year data to reflect the new order
+                    dataManager.fetchYearData(activitiesCount: activitiesManager.activities.count)
                 }
 
                 Button(action: {
