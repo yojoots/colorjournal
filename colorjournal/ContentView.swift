@@ -139,6 +139,7 @@ struct DayColumnView: View {
     let strokeWidth: CGFloat
     let isEditMode: Bool
     let showGridLines: Bool
+    let isMonthStart: Bool
     let onCellTap: ((Int, Int) -> Void)?
 
     private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
@@ -175,6 +176,15 @@ struct DayColumnView: View {
                 leftPath.move(to: CGPoint(x: 0, y: 0))
                 leftPath.addLine(to: CGPoint(x: 0, y: size.height))
                 context.stroke(leftPath, with: .color(gridColor), lineWidth: 1)
+            }
+
+            // Draw month separator line
+            if isMonthStart {
+                let monthLineColor = Color.white.opacity(0.3)
+                var monthPath = Path()
+                monthPath.move(to: CGPoint(x: 0, y: 0))
+                monthPath.addLine(to: CGPoint(x: 0, y: size.height))
+                context.stroke(monthPath, with: .color(monthLineColor), lineWidth: 1)
             }
         }
         .frame(width: cellSize, height: CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2)
@@ -246,6 +256,7 @@ struct YearGridView: View {
                                         .foregroundColor(.gray)
                                         .fixedSize()
                                         .frame(width: cellSize, alignment: .leading)
+                                        .offset(x: -10)
                                 } else {
                                     Color.clear
                                         .frame(width: cellSize, height: 1)
@@ -257,11 +268,14 @@ struct YearGridView: View {
 
                     // Day grid
                     let gridPadding: CGFloat = cellSpacing / 2 + 1
-                    let gridHeight = CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2
+                    // Add extra height for selection border (highlightPadding + strokeWidth on top and bottom)
+                    let selectionExtraHeight: CGFloat = isExpanded ? (highlightPadding + strokeWidth) * 2 : 0
+                    let gridHeight = CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2 + selectionExtraHeight
                     LazyHStack(alignment: .top, spacing: 0) {
                         ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
                             let isSelected = day == selectedDayOfYear
                             let dayData = yearData[day] ?? []
+                            let isMonthStart = Self.monthStartDaysCache[day] != nil
                             DayColumnView(
                                 day: day,
                                 dayData: dayData,
@@ -273,6 +287,7 @@ struct YearGridView: View {
                                 strokeWidth: strokeWidth,
                                 isEditMode: isEditMode,
                                 showGridLines: showGridLines,
+                                isMonthStart: isExpanded && isMonthStart,
                                 onCellTap: onCellTap
                             )
                             .id(day)
@@ -381,7 +396,7 @@ struct ExpandedYearGridView: View {
                     }
                 )
                 .padding(.horizontal)
-                .padding(.top, 16)
+                .padding(.top, 40)
 
                 if isEditMode {
                     Text("Tap cells to toggle")
