@@ -8,15 +8,17 @@ struct Activity: Identifiable, Codable {
     var id: UUID
     var name: String
     var colorHex: String
+    var maxIntensity: Int = 1  // 1 = binary, 2 = two levels, 3 = three levels
 
     var color: Color {
         Color(hex: colorHex)
     }
 
-    init(id: UUID = UUID(), name: String, color: Color) {
+    init(id: UUID = UUID(), name: String, color: Color, maxIntensity: Int = 1) {
         self.id = id
         self.name = name
         self.colorHex = color.toHex()
+        self.maxIntensity = maxIntensity
     }
 }
 
@@ -76,9 +78,12 @@ class ActivitiesManager: ObservableObject {
         saveActivities()
     }
 
-    func updateActivity(at index: Int, name: String, color: Color) {
+    func updateActivity(at index: Int, name: String, color: Color, maxIntensity: Int? = nil) {
         activities[index].name = name
         activities[index].colorHex = color.toHex()
+        if let maxIntensity = maxIntensity {
+            activities[index].maxIntensity = maxIntensity
+        }
         saveActivities()
     }
 }
@@ -130,7 +135,7 @@ struct YearGridCell: View, Equatable {
 // Optimized day column using Canvas for fast rendering
 struct DayColumnView: View {
     let day: Int
-    let dayData: [Bool]
+    let dayData: [Int]  // Intensity values (0 = off, 1-3 = intensity level)
     let activities: [Activity]
     let cellSize: CGFloat
     let cellSpacing: CGFloat
@@ -144,6 +149,22 @@ struct DayColumnView: View {
 
     private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
 
+    // Calculate size scale for intensity
+    // Level 1 = slightly smaller, Level 3 = full size (fills cell completely)
+    private func sizeScale(_ intensity: Int, maxIntensity: Int) -> CGFloat {
+        guard intensity > 0, maxIntensity > 1 else { return 1.0 }
+        if maxIntensity == 2 {
+            return intensity == 1 ? 0.85 : 1.0
+        } else {
+            // 3 levels: 0.8, 0.9, 1.0
+            switch intensity {
+            case 1: return 0.8
+            case 2: return 0.9
+            default: return 1.0
+            }
+        }
+    }
+
     var body: some View {
         Canvas { context, size in
             let totalCellHeight = cellSize + cellSpacing
@@ -151,11 +172,19 @@ struct DayColumnView: View {
 
             // Draw cells
             for index in activities.indices {
-                let isColored = index < dayData.count ? dayData[index] : false
+                let intensity = index < dayData.count ? dayData[index] : 0
                 let y = CGFloat(index) * totalCellHeight + yOffset
-                let rect = CGRect(x: 0, y: y, width: cellSize, height: cellSize)
-                let color = isColored ? activities[index].color : Color.black
-                context.fill(Path(rect), with: .color(color))
+
+                if intensity > 0 {
+                    let scale = sizeScale(intensity, maxIntensity: activities[index].maxIntensity)
+                    let scaledHeight = cellSize * scale
+                    let yOffset = (cellSize - scaledHeight) / 2  // Center vertically only
+                    let rect = CGRect(x: 0, y: y + yOffset, width: cellSize, height: scaledHeight)
+                    context.fill(Path(rect), with: .color(activities[index].color))
+                } else {
+                    let rect = CGRect(x: 0, y: y, width: cellSize, height: cellSize)
+                    context.fill(Path(rect), with: .color(Color.black))
+                }
             }
 
             // Draw grid lines if enabled
@@ -188,10 +217,10 @@ struct DayColumnView: View {
             }
         }
         .frame(width: cellSize, height: CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2)
-        .padding(isSelected ? highlightPadding : 0)
         .overlay(
+            // Selection border - thin stroke inside bounds
             Rectangle()
-                .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: strokeWidth)
+                .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture { location in
@@ -213,7 +242,7 @@ struct StreakSegment: Identifiable {
 }
 
 struct YearGridView: View {
-    let yearData: [Int: [Bool]]  // Day number -> array of activity statuses
+    let yearData: [Int: [Int]]  // Day number -> array of intensity values (0 = off, 1-3 = intensity)
     let selectedDate: Date
     let activities: [Activity]
     var isExpanded: Bool = false
@@ -258,7 +287,8 @@ struct YearGridView: View {
             var day = 1
             while day <= daysInYear {
                 let dayData = yearData[day] ?? []
-                let isActive = activityIndex < dayData.count ? dayData[activityIndex] : false
+                let intensity = activityIndex < dayData.count ? dayData[activityIndex] : 0
+                let isActive = intensity > 0
 
                 if isActive {
                     // Start of a streak
@@ -267,8 +297,8 @@ struct YearGridView: View {
 
                     while day <= daysInYear {
                         let d = yearData[day] ?? []
-                        let active = activityIndex < d.count ? d[activityIndex] : false
-                        if active {
+                        let dayIntensity = activityIndex < d.count ? d[activityIndex] : 0
+                        if dayIntensity > 0 {
                             length += 1
                             day += 1
                         } else {
@@ -408,12 +438,16 @@ struct ExpandedYearGridView: View {
     private func toggleCell(dayOfYear: Int, activityIndex: Int) {
         let date = dateFromDayOfYear(dayOfYear)
         let dayData = dataManager.yearData[dayOfYear] ?? []
-        let isCurrentlyOn = activityIndex < dayData.count ? dayData[activityIndex] : false
+        let currentIntensity = activityIndex < dayData.count ? dayData[activityIndex] : 0
+        let maxIntensity = activities[activityIndex].maxIntensity
 
-        if isCurrentlyOn {
+        // Cycle through intensity levels: 0 -> 1 -> 2 -> 3 -> 0 (capped at maxIntensity)
+        let newIntensity = (currentIntensity + 1) > maxIntensity ? 0 : currentIntensity + 1
+
+        if newIntensity == 0 {
             dataManager.clearCell(row: activityIndex, date: date)
         } else {
-            dataManager.updateCell(row: activityIndex, date: date, color: activities[activityIndex].color)
+            dataManager.setIntensity(row: activityIndex, date: date, intensity: newIntensity)
         }
     }
 
@@ -423,9 +457,9 @@ struct ExpandedYearGridView: View {
 
         while day >= 1 {
             let dayData = dataManager.yearData[day] ?? []
-            let isActive = activityIndex < dayData.count ? dayData[activityIndex] : false
+            let intensity = activityIndex < dayData.count ? dayData[activityIndex] : 0
 
-            if isActive {
+            if intensity > 0 {
                 streak += 1
                 day -= 1
             } else {
@@ -615,14 +649,15 @@ struct ExpandedYearGridView: View {
 
 
 class LocalDataManager: ObservableObject {
-    @Published var cellStatuses: [Int: Bool] = [:] // Track colored status for each row
-    @Published var yearData: [Int: [Bool]] = [:] // Day -> Array of activity statuses
+    @Published var cellStatuses: [Int: Int] = [:] // Track intensity for each row (0 = off, 1-3 = intensity)
+    @Published var yearData: [Int: [Int]] = [:] // Day -> Array of intensity values
 
     let defaults = UserDefaults.standard
     let dataKey = "activityData"
+    let dataVersionKey = "activityDataVersion"
 
-    // Data structure: [dateString: [activityIndex: true/false]]
-    var allData: [String: [Int: Bool]] = [:]
+    // Data structure: [dateString: [activityIndex: intensity (0-3)]]
+    var allData: [String: [Int: Int]] = [:]
 
     init() {
         loadData()
@@ -636,8 +671,31 @@ class LocalDataManager: ObservableObject {
     }
 
     private func loadData() {
+        let currentVersion = defaults.integer(forKey: dataVersionKey)
+
+        if currentVersion < 1 {
+            // Migration from Bool format to Int format
+            if let data = defaults.data(forKey: dataKey),
+               let decoded = try? JSONDecoder().decode([String: [Int: Bool]].self, from: data) {
+                // Convert Bool to Int: true -> 1, false -> 0
+                var migratedData: [String: [Int: Int]] = [:]
+                for (dateKey, dayData) in decoded {
+                    var migratedDayData: [Int: Int] = [:]
+                    for (index, isActive) in dayData {
+                        migratedDayData[index] = isActive ? 1 : 0
+                    }
+                    migratedData[dateKey] = migratedDayData
+                }
+                allData = migratedData
+                defaults.set(1, forKey: dataVersionKey)
+                saveData()
+                return
+            }
+        }
+
+        // Load new Int format
         if let data = defaults.data(forKey: dataKey),
-           let decoded = try? JSONDecoder().decode([String: [Int: Bool]].self, from: data) {
+           let decoded = try? JSONDecoder().decode([String: [Int: Int]].self, from: data) {
             allData = decoded
         }
     }
@@ -688,10 +746,10 @@ class LocalDataManager: ObservableObject {
         }
 
         // Apply the mapping to all stored data
-        var newAllData: [String: [Int: Bool]] = [:]
+        var newAllData: [String: [Int: Int]] = [:]
 
         for (dateKey, dayData) in allData {
-            var newDayData: [Int: Bool] = [:]
+            var newDayData: [Int: Int] = [:]
             for (oldIndex, value) in dayData {
                 if let newIndex = indexMap[oldIndex] {
                     newDayData[newIndex] = value
@@ -710,7 +768,7 @@ class LocalDataManager: ObservableObject {
     func fetchYearData(activitiesCount: Int = 13) {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
-        var newYearData: [Int: [Bool]] = [:]
+        var newYearData: [Int: [Int]] = [:]
 
         // Build year data from stored data
         for day in 1...AppConfig.daysInYear(year) {
@@ -722,10 +780,10 @@ class LocalDataManager: ObservableObject {
                 let key = dateKey(from: date)
                 let dayActivities = allData[key] ?? [:]
 
-                var activitiesArray = Array(repeating: false, count: activitiesCount)
-                for (index, isActive) in dayActivities {
+                var activitiesArray = Array(repeating: 0, count: activitiesCount)
+                for (index, intensity) in dayActivities {
                     if index < activitiesArray.count {
-                        activitiesArray[index] = isActive
+                        activitiesArray[index] = intensity
                     }
                 }
                 newYearData[day] = activitiesArray
@@ -744,24 +802,24 @@ class LocalDataManager: ObservableObject {
         DispatchQueue.main.async {
             self.cellStatuses.removeAll()
             for index in 0..<activitiesCount {
-                self.cellStatuses[index] = dayData[index] ?? false
+                self.cellStatuses[index] = dayData[index] ?? 0
             }
         }
     }
 
-    func updateCell(row: Int, date: Date, color: Color) {
+    func updateCell(row: Int, date: Date, color: Color, intensity: Int = 1) {
         let key = dateKey(from: date)
 
         if allData[key] == nil {
             allData[key] = [:]
         }
-        allData[key]?[row] = true
+        allData[key]?[row] = intensity
 
         saveData()
 
         // Update local states
         DispatchQueue.main.async {
-            self.cellStatuses[row] = true
+            self.cellStatuses[row] = intensity
 
             // Update yearData
             let calendar = Calendar.current
@@ -769,9 +827,35 @@ class LocalDataManager: ObservableObject {
             let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
 
             if self.yearData[dayOfYear] == nil {
-                self.yearData[dayOfYear] = Array(repeating: false, count: AppConfig.colors.count)
+                self.yearData[dayOfYear] = Array(repeating: 0, count: 13)
             }
-            self.yearData[dayOfYear]?[row] = true
+            self.yearData[dayOfYear]?[row] = intensity
+        }
+    }
+
+    func setIntensity(row: Int, date: Date, intensity: Int) {
+        let key = dateKey(from: date)
+
+        if allData[key] == nil {
+            allData[key] = [:]
+        }
+        allData[key]?[row] = intensity
+
+        saveData()
+
+        // Update local states
+        DispatchQueue.main.async {
+            self.cellStatuses[row] = intensity
+
+            // Update yearData
+            let calendar = Calendar.current
+            let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: date))!
+            let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
+
+            if self.yearData[dayOfYear] == nil {
+                self.yearData[dayOfYear] = Array(repeating: 0, count: 13)
+            }
+            self.yearData[dayOfYear]?[row] = intensity
         }
     }
 
@@ -779,14 +863,14 @@ class LocalDataManager: ObservableObject {
         let key = dateKey(from: date)
 
         if allData[key] != nil {
-            allData[key]?[row] = false
+            allData[key]?[row] = 0
         }
 
         saveData()
 
         // Update local states
         DispatchQueue.main.async {
-            self.cellStatuses[row] = false
+            self.cellStatuses[row] = 0
 
             // Update yearData
             let calendar = Calendar.current
@@ -794,7 +878,7 @@ class LocalDataManager: ObservableObject {
             let dayOfYear = calendar.dateComponents([.day], from: startOfYear, to: date).day! + 1
 
             if self.yearData[dayOfYear] != nil {
-                self.yearData[dayOfYear]?[row] = false
+                self.yearData[dayOfYear]?[row] = 0
             }
         }
     }
@@ -818,7 +902,15 @@ class LocalDataManager: ObservableObject {
                 var row = [dateString]
 
                 for index in 0..<activities.count {
-                    row.append(dayData[index] == true ? "✓" : "")
+                    let intensity = dayData[index] ?? 0
+                    if intensity == 0 {
+                        row.append("")
+                    } else if activities[index].maxIntensity == 1 {
+                        row.append("✓")
+                    } else {
+                        // For multi-level activities, show the intensity number
+                        row.append(String(intensity))
+                    }
                 }
                 csv += row.joined(separator: ",") + "\n"
             }
@@ -1021,15 +1113,20 @@ class GoogleSheetsExporter: ObservableObject {
                 if let date = calendar.date(from: dateComponents) {
                     let dateString = dataManager.dateKey(from: date)
                     let dayData = dataManager.allData[dateString] ?? [:]
-                    let isActive = dayData[activityIndex] == true
+                    let intensity = dayData[activityIndex] ?? 0
 
                     let cell = GTLRSheets_CellData()
 
-                    if isActive {
+                    if intensity > 0 {
                         cell.userEnteredValue = GTLRSheets_ExtendedValue()
-                        cell.userEnteredValue?.stringValue = "✓"
+                        // Show intensity number for multi-level activities, checkmark for binary
+                        if activity.maxIntensity > 1 {
+                            cell.userEnteredValue?.stringValue = String(intensity)
+                        } else {
+                            cell.userEnteredValue?.stringValue = "✓"
+                        }
 
-                        // Apply background color
+                        // Apply background color with opacity based on intensity
                         let format = GTLRSheets_CellFormat()
                         let bgColor = GTLRSheets_Color()
 
@@ -1040,9 +1137,24 @@ class GoogleSheetsExporter: ObservableObject {
                         var alpha: CGFloat = 0
                         uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
 
-                        bgColor.red = NSNumber(value: Float(red))
-                        bgColor.green = NSNumber(value: Float(green))
-                        bgColor.blue = NSNumber(value: Float(blue))
+                        // Apply brightness boost for intensity (1.0, 1.15, 1.3 for levels 1, 2, 3)
+                        let boost: Float
+                        if activity.maxIntensity == 1 {
+                            boost = 1.0
+                        } else if activity.maxIntensity == 2 {
+                            boost = intensity == 2 ? 1.2 : 1.0
+                        } else {
+                            switch intensity {
+                            case 2: boost = 1.15
+                            case 3: boost = 1.3
+                            default: boost = 1.0
+                            }
+                        }
+
+                        // Boost brightness by multiplying RGB (capped at 1.0)
+                        bgColor.red = NSNumber(value: min(Float(red) * boost, 1.0))
+                        bgColor.green = NSNumber(value: min(Float(green) * boost, 1.0))
+                        bgColor.blue = NSNumber(value: min(Float(blue) * boost, 1.0))
 
                         format.backgroundColor = bgColor
                         cell.userEnteredFormat = format
@@ -1120,48 +1232,63 @@ class GoogleSheetsExporter: ObservableObject {
 struct CheckmarkView: View {
     let index: Int
     let color: Color
-    let isChecked: Bool
+    let intensity: Int  // 0 = unchecked, 1-3 = intensity level
+    let maxIntensity: Int  // Max intensity for this activity
     let date: Date
     @ObservedObject var dataManager: LocalDataManager
     @State private var isLongPressing = false
-    
+
+    private var isChecked: Bool { intensity > 0 }
+
     var body: some View {
         Image(systemName: isChecked ? "checkmark.square.fill" : "square")
             .foregroundColor(color)
             .imageScale(.large)
-            .padding(.leading, 8)
             .scaleEffect(isLongPressing ? 1.2 : 1.0)
-            .onTapGesture {
-                if !isChecked {
-                    dataManager.updateCell(row: index, date: date, color: color)
+            .overlay(alignment: .topTrailing) {
+                // Show intensity badge for multi-level activities when intensity > 1
+                if maxIntensity > 1 && intensity > 1 {
+                    Text("\(intensity)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(2)
+                        .background(color)
+                        .clipShape(Circle())
+                        .offset(x: 6, y: -6)
                 }
             }
-            .gesture(
-                LongPressGesture(minimumDuration: 0.25)
-                    .onEnded { _ in
-                        if isChecked {
-                            // Add haptic feedback
-                            let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                            impactFeedback.impactOccurred()
+            .padding(.leading, 8)
+        .onTapGesture {
+            if !isChecked {
+                dataManager.updateCell(row: index, date: date, color: color)
+            }
+        }
+        .gesture(
+            LongPressGesture(minimumDuration: 0.25)
+                .onEnded { _ in
+                    if isChecked {
+                        // Add haptic feedback
+                        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                        impactFeedback.impactOccurred()
 
-                            dataManager.clearCell(row: index, date: date)
+                        dataManager.clearCell(row: index, date: date)
+                    }
+                }
+                .simultaneously(with: DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        if !isLongPressing {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isLongPressing = true
+                            }
                         }
                     }
-                    .simultaneously(with: DragGesture(minimumDistance: 0)
-                        .onChanged { _ in
-                            if !isLongPressing {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    isLongPressing = true
-                                }
-                            }
+                    .onEnded { _ in
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isLongPressing = false
                         }
-                        .onEnded { _ in
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                isLongPressing = false
-                            }
-                        }
-                    )
-            )
+                    }
+                )
+        )
     }
 }
 
@@ -1225,7 +1352,7 @@ struct ParticleView: View {
 struct SnapButtonStyle: ButtonStyle {
     let color: Color
     @Binding var isAnimating: Bool
-    
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.85 : 1.0)
@@ -1235,6 +1362,88 @@ struct SnapButtonStyle: ButtonStyle {
                     ParticleView(color: color, isAnimating: $isAnimating)
                 }
             )
+    }
+}
+
+// Activity button with swipe gesture for intensity control
+struct ActivityButton: View {
+    let activity: Activity
+    let currentIntensity: Int
+    let isAnimating: Bool
+    @Binding var isParticleAnimating: Bool
+    let needsDarkText: Bool
+    let onTap: () -> Void
+    let onSwipeRight: () -> Void
+    let onSwipeLeft: () -> Void
+
+    @State private var dragOffset: CGFloat = 0
+    @State private var isPressed: Bool = false
+
+    private let swipeThreshold: CGFloat = 40
+
+    var body: some View {
+        ZStack {
+            // Main button content
+            HStack {
+                Text(activity.name)
+                    .foregroundColor(needsDarkText ? .black : .white)
+                    .frame(maxWidth: .infinity)
+
+                // Show intensity indicator for multi-level activities
+                if activity.maxIntensity > 1 && currentIntensity > 0 {
+                    Text("\(currentIntensity)/\(activity.maxIntensity)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(needsDarkText ? .black.opacity(0.7) : .white.opacity(0.8))
+                        .padding(.trailing, 8)
+                }
+            }
+            .frame(height: 40)
+            .frame(width: 250)
+            .background(activity.color)
+            .cornerRadius(8)
+            .scaleEffect(isPressed ? 0.95 : (isAnimating ? 1.05 : 1.0))
+            .offset(x: dragOffset)
+            .animation(.spring(response: 0.15, dampingFraction: 0.5), value: isPressed)
+            .animation(.spring(response: 0.15, dampingFraction: 0.4), value: isAnimating)
+
+            // Particle overlay
+            ParticleView(color: activity.color, isAnimating: $isParticleAnimating)
+        }
+        .frame(width: 250, height: 40)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onChanged { value in
+                    // Only capture horizontal drags (let vertical pass to ScrollView)
+                    let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+                    if activity.maxIntensity > 1 && isHorizontal {
+                        dragOffset = value.translation.width * 0.3  // Dampen the drag
+                    }
+                }
+                .onEnded { value in
+                    withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                        dragOffset = 0
+                    }
+
+                    // Only trigger swipe if it was predominantly horizontal
+                    let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+                    if activity.maxIntensity > 1 && isHorizontal {
+                        if value.translation.width > swipeThreshold {
+                            onSwipeRight()
+                        } else if value.translation.width < -swipeThreshold {
+                            onSwipeLeft()
+                        }
+                    }
+                }
+        )
+        .onTapGesture {
+            isPressed = true
+            onTap()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isPressed = false
+            }
+        }
     }
 }
 
@@ -1299,47 +1508,64 @@ struct ContentView: View {
 
                         ForEach(activitiesManager.activities.indices, id: \.self) { index in
                             let activity = activitiesManager.activities[index]
+                            let currentIntensity = dataManager.cellStatuses[index] ?? 0
                             HStack {
-                                Button(action: {
-                                    withAnimation(.spring(response: 0.15, dampingFraction: 0.4)) {
-                                        animatingButtons.insert(activity.name)
-                                        particleButtons.insert(activity.name)
-                                    }
-
-                                    dataManager.updateCell(row: index, date: selectedDate, color: activity.color)
-
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                        animatingButtons.remove(activity.name)
-                                    }
-                                }) {
-                                    HStack {
-                                        Text(activity.name)
-                                            .foregroundColor(needsDarkText(for: activity.color) ? .black : .white)
-                                            .frame(maxWidth: .infinity)
-                                    }
-                                    .frame(height: 40)
-                                    .frame(maxWidth: 250)
-                                    .background(activity.color)
-                                    .cornerRadius(8)
-                                }
-                                .buttonStyle(SnapButtonStyle(
-                                    color: activity.color,
-                                    isAnimating: .init(
+                                ActivityButton(
+                                    activity: activity,
+                                    currentIntensity: currentIntensity,
+                                    isAnimating: animatingButtons.contains(activity.name),
+                                    isParticleAnimating: .init(
                                         get: { particleButtons.contains(activity.name) },
                                         set: { isAnimating in
                                             if !isAnimating {
                                                 particleButtons.remove(activity.name)
                                             }
                                         }
-                                    )
-                                ))
-                                .scaleEffect(animatingButtons.contains(activity.name) ? 1.05 : 1.0)
-                                
+                                    ),
+                                    needsDarkText: needsDarkText(for: activity.color),
+                                    onTap: {
+                                        withAnimation(.spring(response: 0.15, dampingFraction: 0.4)) {
+                                            animatingButtons.insert(activity.name)
+                                            particleButtons.insert(activity.name)
+                                        }
+
+                                        // Toggle: if on, turn off; if off, turn on with intensity 1
+                                        if currentIntensity > 0 {
+                                            dataManager.clearCell(row: index, date: selectedDate)
+                                        } else {
+                                            dataManager.updateCell(row: index, date: selectedDate, color: activity.color)
+                                        }
+
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                            animatingButtons.remove(activity.name)
+                                        }
+                                    },
+                                    onSwipeRight: {
+                                        // Increase intensity (capped at maxIntensity)
+                                        let newIntensity = min(currentIntensity + 1, activity.maxIntensity)
+                                        if newIntensity != currentIntensity {
+                                            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                                            impactFeedback.impactOccurred()
+                                            dataManager.setIntensity(row: index, date: selectedDate, intensity: newIntensity)
+                                        }
+                                    },
+                                    onSwipeLeft: {
+                                        // Decrease intensity (down to 0)
+                                        let newIntensity = max(currentIntensity - 1, 0)
+                                        if newIntensity != currentIntensity {
+                                            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                                            impactFeedback.impactOccurred()
+                                            dataManager.setIntensity(row: index, date: selectedDate, intensity: newIntensity)
+                                        }
+                                    }
+                                )
+
                                 // Add checkbox indicator
                                 CheckmarkView(
                                     index: index,
                                     color: activity.color,
-                                    isChecked: dataManager.cellStatuses[index] == true,
+                                    intensity: currentIntensity,
+                                    maxIntensity: activity.maxIntensity,
                                     date: selectedDate,
                                     dataManager: dataManager
                                 )
@@ -1818,6 +2044,23 @@ struct ActivityEditView: View {
                     }
                     .padding(.vertical)
                 }
+
+                Section {
+                    Picker("Intensity Levels", selection: $activity.maxIntensity) {
+                        Text("Binary (Yes/No)").tag(1)
+                        Text("2 Levels").tag(2)
+                        Text("3 Levels").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Intensity Levels")
+                } footer: {
+                    if activity.maxIntensity == 1 {
+                        Text("Simple on/off tracking")
+                    } else {
+                        Text("Swipe right on the activity button to increase intensity, left to decrease. Grid shows opacity based on intensity level.")
+                    }
+                }
             }
             .navigationTitle("Edit Activity")
             .navigationBarItems(
@@ -1829,7 +2072,8 @@ struct ActivityEditView: View {
                         activitiesManager.updateActivity(
                             at: index,
                             name: activity.name,
-                            color: Color(hex: activity.colorHex)
+                            color: Color(hex: activity.colorHex),
+                            maxIntensity: activity.maxIntensity
                         )
                     }
                     dismiss()
