@@ -49,7 +49,7 @@ class ActivitiesManager: ObservableObject {
                 Activity(name: "Music 🎵", color: Color(red: 0.3, green: 0.2, blue: 0.8)),
                 Activity(name: "Chores 🧹", color: Color(red: 1.0, green: 0.4, blue: 0.7)),
                 Activity(name: "Sleep 💤", color: Color(red: 0.2, green: 0.8, blue: 1.0)),
-                Activity(name: "Mind 🧠", color: Color(red: 0.6, green: 0.6, blue: 0.6)),
+                Activity(name: "Mind 💭", color: Color(red: 0.6, green: 0.6, blue: 0.6)),
                 Activity(name: "Sick 🤒", color: Color(red: 0.6, green: 0.4, blue: 0.2))
             ]
         }
@@ -205,6 +205,13 @@ struct DayColumnView: View {
     }
 }
 
+struct StreakSegment: Identifiable {
+    let id = UUID()
+    let activityIndex: Int
+    let startDay: Int
+    let length: Int
+}
+
 struct YearGridView: View {
     let yearData: [Int: [Bool]]  // Day number -> array of activity statuses
     let selectedDate: Date
@@ -212,6 +219,7 @@ struct YearGridView: View {
     var isExpanded: Bool = false
     var isEditMode: Bool = false
     var showGridLines: Bool = false
+    var showStreakOverlay: Bool = false
     var onCellTap: ((Int, Int) -> Void)? = nil  // (dayOfYear, activityIndex)
 
     private var cellSize: CGFloat { isExpanded ? 16 : 3 }
@@ -242,6 +250,45 @@ struct YearGridView: View {
         return result
     }()
 
+    private func calculateStreakSegments() -> [StreakSegment] {
+        var segments: [StreakSegment] = []
+        let daysInYear = AppConfig.daysInCurrentYear
+
+        for activityIndex in activities.indices {
+            var day = 1
+            while day <= daysInYear {
+                let dayData = yearData[day] ?? []
+                let isActive = activityIndex < dayData.count ? dayData[activityIndex] : false
+
+                if isActive {
+                    // Start of a streak
+                    let startDay = day
+                    var length = 0
+
+                    while day <= daysInYear {
+                        let d = yearData[day] ?? []
+                        let active = activityIndex < d.count ? d[activityIndex] : false
+                        if active {
+                            length += 1
+                            day += 1
+                        } else {
+                            break
+                        }
+                    }
+
+                    // Only show number if streak is 2+ days
+                    if length >= 2 {
+                        segments.append(StreakSegment(activityIndex: activityIndex, startDay: startDay, length: length))
+                    }
+                } else {
+                    day += 1
+                }
+            }
+        }
+
+        return segments
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -256,7 +303,7 @@ struct YearGridView: View {
                                         .foregroundColor(.gray)
                                         .fixedSize()
                                         .frame(width: cellSize, alignment: .leading)
-                                        .offset(x: -10)
+                                        .offset(x: day == 1 ? 0 : -10)
                                 } else {
                                     Color.clear
                                         .frame(width: cellSize, height: 1)
@@ -271,26 +318,44 @@ struct YearGridView: View {
                     // Add extra height for selection border (highlightPadding + strokeWidth on top and bottom)
                     let selectionExtraHeight: CGFloat = (highlightPadding + strokeWidth) * 2
                     let gridHeight = CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2 + selectionExtraHeight
-                    LazyHStack(alignment: .top, spacing: 0) {
-                        ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
-                            let isSelected = day == selectedDayOfYear
-                            let dayData = yearData[day] ?? []
-                            let isMonthStart = Self.monthStartDaysCache[day] != nil
-                            DayColumnView(
-                                day: day,
-                                dayData: dayData,
-                                activities: activities,
-                                cellSize: cellSize,
-                                cellSpacing: cellSpacing,
-                                isSelected: isSelected,
-                                highlightPadding: highlightPadding,
-                                strokeWidth: strokeWidth,
-                                isEditMode: isEditMode,
-                                showGridLines: showGridLines,
-                                isMonthStart: isExpanded && isMonthStart,
-                                onCellTap: onCellTap
-                            )
-                            .id(day)
+                    ZStack(alignment: .topLeading) {
+                        LazyHStack(alignment: .top, spacing: 0) {
+                            ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
+                                let isSelected = day == selectedDayOfYear
+                                let dayData = yearData[day] ?? []
+                                let isMonthStart = Self.monthStartDaysCache[day] != nil
+                                DayColumnView(
+                                    day: day,
+                                    dayData: dayData,
+                                    activities: activities,
+                                    cellSize: cellSize,
+                                    cellSpacing: cellSpacing,
+                                    isSelected: isSelected,
+                                    highlightPadding: highlightPadding,
+                                    strokeWidth: strokeWidth,
+                                    isEditMode: isEditMode,
+                                    showGridLines: showGridLines,
+                                    isMonthStart: isExpanded && isMonthStart,
+                                    onCellTap: onCellTap
+                                )
+                                .id(day)
+                            }
+                        }
+
+                        // Streak overlay (only in expanded mode with showStreakOverlay)
+                        if isExpanded && showStreakOverlay {
+                            let segments = calculateStreakSegments()
+                            ForEach(segments) { segment in
+                                let xPos = CGFloat(segment.startDay - 1) * cellSize + CGFloat(segment.length) * cellSize / 2
+                                let yPos = gridPadding + CGFloat(segment.activityIndex) * (cellSize + cellSpacing) + cellSize / 2
+                                Text("\(segment.length)")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .shadow(color: .black, radius: 1, x: 0, y: 0)
+                                    .shadow(color: .black, radius: 1, x: 0, y: 0)
+                                    .position(x: xPos, y: yPos)
+                                    .allowsHitTesting(false)
+                            }
                         }
                     }
                     .frame(height: gridHeight)
@@ -319,6 +384,11 @@ struct ExpandedYearGridView: View {
     @State private var isEditMode: Bool = false
     @State private var showGridLines: Bool = false
     @State private var showStreaks: Bool = false
+    @State private var showLegend: Bool = true
+
+    // Grid layout constants (must match YearGridView)
+    private let cellSize: CGFloat = 16
+    private let cellSpacing: CGFloat = 4
 
     private var todayDayOfYear: Int {
         let calendar = Calendar.current
@@ -366,6 +436,24 @@ struct ExpandedYearGridView: View {
         return streak
     }
 
+    private func trimTrailingEmoji(_ text: String) -> String {
+        var result = text.trimmingCharacters(in: .whitespaces)
+        while let lastChar = result.unicodeScalars.last {
+            // Check if it's an emoji (various Unicode ranges)
+            let isEmoji = lastChar.properties.isEmoji && lastChar.properties.isEmojiPresentation
+                || (lastChar.value >= 0x1F300 && lastChar.value <= 0x1FAD6)
+                || (lastChar.value >= 0x2600 && lastChar.value <= 0x27BF)
+                || lastChar.value == 0xFE0F // variation selector
+            if isEmoji {
+                result = String(result.dropLast())
+                result = result.trimmingCharacters(in: .whitespaces)
+            } else {
+                break
+            }
+        }
+        return result
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -382,6 +470,7 @@ struct ExpandedYearGridView: View {
                                 .font(.title2)
                             Text(isEditMode ? "Done" : "Edit")
                                 .font(.subheadline)
+                                .fixedSize()
                         }
                         .foregroundColor(isEditMode ? .yellow : .gray)
                     }
@@ -397,6 +486,17 @@ struct ExpandedYearGridView: View {
                         Image(systemName: showStreaks ? "flame.circle.fill" : "flame.circle")
                             .font(.title2)
                             .foregroundColor(showStreaks ? .orange : .gray)
+                    }
+                    .padding(.trailing, 8)
+
+                    Button(action: {
+                        withAnimation {
+                            showLegend.toggle()
+                        }
+                    }) {
+                        Image(systemName: showLegend ? "list.bullet.circle.fill" : "list.bullet.circle")
+                            .font(.title2)
+                            .foregroundColor(showLegend ? .cyan : .gray)
                     }
                     .padding(.trailing, 8)
 
@@ -448,18 +548,49 @@ struct ExpandedYearGridView: View {
                     .frame(height: 30)
                 }
 
-                YearGridView(
-                    yearData: dataManager.yearData,
-                    selectedDate: selectedDate,
-                    activities: activities,
-                    isExpanded: true,
-                    isEditMode: isEditMode,
-                    showGridLines: showGridLines,
-                    onCellTap: { dayOfYear, activityIndex in
-                        toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
+                HStack(alignment: .top, spacing: 8) {
+                    // Legend
+                    if showLegend {
+                        VStack(alignment: .trailing, spacing: 0) {
+                            // Spacer for month markers row
+                            Color.clear.frame(height: 20)
+
+                            // Legend items aligned with grid rows
+                            let gridPadding: CGFloat = cellSpacing / 2 + 1
+                            VStack(alignment: .trailing, spacing: cellSpacing) {
+                                ForEach(activities.indices, id: \.self) { index in
+                                    HStack(spacing: 4) {
+                                        Text(trimTrailingEmoji(activities[index].name))
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.gray)
+                                            .lineLimit(1)
+                                        Circle()
+                                            .fill(activities[index].color)
+                                            .frame(width: 8, height: 8)
+                                    }
+                                    .frame(height: cellSize)
+                                }
+                            }
+                            .padding(.top, gridPadding)
+                        }
+                        .frame(width: 70)
                     }
-                )
-                .padding(.horizontal)
+
+                    YearGridView(
+                        yearData: dataManager.yearData,
+                        selectedDate: selectedDate,
+                        activities: activities,
+                        isExpanded: true,
+                        isEditMode: isEditMode,
+                        showGridLines: showGridLines,
+                        showStreakOverlay: showStreaks,
+                        onCellTap: { dayOfYear, activityIndex in
+                            toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
+                        }
+                    )
+                }
+                .padding(.leading, 8)
+                .padding(.trailing, 16)
                 .padding(.top, showStreaks ? 20 : 40)
 
                 if isEditMode {
@@ -473,7 +604,7 @@ struct ExpandedYearGridView: View {
             }
         }
         .onTapGesture {
-            if !isEditMode && !showStreaks {
+            if !isEditMode && !showStreaks && !showLegend {
                 withAnimation {
                     isPresented = false
                 }
