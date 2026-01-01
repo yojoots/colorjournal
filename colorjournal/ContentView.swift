@@ -145,6 +145,7 @@ struct DayColumnView: View {
     let isEditMode: Bool
     let showGridLines: Bool
     let isMonthStart: Bool
+    let isLastDay: Bool
     let onCellTap: ((Int, Int) -> Void)?
 
     private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
@@ -179,10 +180,10 @@ struct DayColumnView: View {
                     let scale = sizeScale(intensity, maxIntensity: activities[index].maxIntensity)
                     let scaledHeight = cellSize * scale
                     let yOffset = (cellSize - scaledHeight) / 2  // Center vertically only
-                    let rect = CGRect(x: 0, y: y + yOffset, width: cellSize, height: scaledHeight)
+                    let rect = CGRect(x: 0, y: y + yOffset, width: size.width, height: scaledHeight)
                     context.fill(Path(rect), with: .color(activities[index].color))
                 } else {
-                    let rect = CGRect(x: 0, y: y, width: cellSize, height: cellSize)
+                    let rect = CGRect(x: 0, y: y, width: size.width, height: cellSize)
                     context.fill(Path(rect), with: .color(Color.black))
                 }
             }
@@ -196,7 +197,7 @@ struct DayColumnView: View {
                     let y = CGFloat(i) * totalCellHeight - cellSpacing / 2 + yOffset
                     var path = Path()
                     path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: cellSize, y: y))
+                    path.addLine(to: CGPoint(x: size.width, y: y))
                     context.stroke(path, with: .color(gridColor), lineWidth: 1)
                 }
 
@@ -205,6 +206,14 @@ struct DayColumnView: View {
                 leftPath.move(to: CGPoint(x: 0, y: 0))
                 leftPath.addLine(to: CGPoint(x: 0, y: size.height))
                 context.stroke(leftPath, with: .color(gridColor), lineWidth: 1)
+
+                // Draw right edge on last day
+                if isLastDay {
+                    var rightPath = Path()
+                    rightPath.move(to: CGPoint(x: size.width, y: 0))
+                    rightPath.addLine(to: CGPoint(x: size.width, y: size.height))
+                    context.stroke(rightPath, with: .color(gridColor), lineWidth: 1)
+                }
             }
 
             // Draw month separator line
@@ -216,7 +225,7 @@ struct DayColumnView: View {
                 context.stroke(monthPath, with: .color(monthLineColor), lineWidth: 1)
             }
         }
-        .frame(width: cellSize, height: CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2)
+        .frame(width: isSelected ? cellSize + 2 : cellSize, height: CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2)
         .overlay(
             // Selection border - thin stroke inside bounds
             Rectangle()
@@ -417,6 +426,7 @@ struct YearGridView: View {
                                     isEditMode: isEditMode,
                                     showGridLines: showGridLines,
                                     isMonthStart: isExpanded && isMonthStart,
+                                    isLastDay: day == daysInDisplayYear,
                                     onCellTap: onCellTap
                                 )
                                 .id(day)
