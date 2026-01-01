@@ -238,13 +238,15 @@ struct StreakSegment: Identifiable {
     let id = UUID()
     let activityIndex: Int
     let startDay: Int
-    let length: Int
+    let visibleLength: Int  // Days visible on this year's grid
+    let totalLength: Int    // Total streak including previous year carryover
 }
 
 struct YearGridView: View {
     let yearData: [Int: [Int]]  // Day number -> array of intensity values (0 = off, 1-3 = intensity)
     let selectedDate: Date
     let activities: [Activity]
+    var dataManager: LocalDataManager? = nil  // Optional, needed for cross-year streak calculation
     var isExpanded: Bool = false
     var isEditMode: Bool = false
     var showGridLines: Bool = false
@@ -256,16 +258,23 @@ struct YearGridView: View {
     private var highlightPadding: CGFloat { isExpanded ? 1 : 1 }
     private var strokeWidth: CGFloat { isExpanded ? 2 : 1 }
 
+    private var displayYear: Int {
+        Calendar.current.component(.year, from: selectedDate)
+    }
+
+    private var daysInDisplayYear: Int {
+        AppConfig.daysInYear(displayYear)
+    }
+
     private var selectedDayOfYear: Int {
         let calendar = Calendar.current
         let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: selectedDate))!
         return calendar.dateComponents([.day], from: startOfYear, to: selectedDate).day! + 1
     }
 
-    // Computed once, cached
-    private static let monthStartDaysCache: [Int: String] = {
+    // Calculate month start days for a specific year
+    private func monthStartDays(for year: Int) -> [Int: String] {
         let calendar = Calendar.current
-        let year = calendar.component(.year, from: Date())
         let monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         var result: [Int: String] = [:]
 
@@ -277,11 +286,45 @@ struct YearGridView: View {
             }
         }
         return result
-    }()
+    }
+
+    // Count how many days the streak continues backwards from Dec 31 of the previous year
+    private func previousYearCarryover(for activityIndex: Int) -> Int {
+        guard let dataManager = dataManager else { return 0 }
+
+        let calendar = Calendar.current
+        let previousYear = displayYear - 1
+
+        // Start from Dec 31 of previous year and count backwards
+        guard let dec31 = calendar.date(from: DateComponents(year: previousYear, month: 12, day: 31)) else {
+            return 0
+        }
+
+        var count = 0
+        var currentDate = dec31
+
+        while true {
+            let dateKey = dataManager.dateKey(from: currentDate)
+            let dayData = dataManager.allData[dateKey] ?? [:]
+            let intensity = dayData[activityIndex] ?? 0
+
+            if intensity > 0 {
+                count += 1
+                guard let previousDate = calendar.date(byAdding: .day, value: -1, to: currentDate) else {
+                    break
+                }
+                currentDate = previousDate
+            } else {
+                break
+            }
+        }
+
+        return count
+    }
 
     private func calculateStreakSegments() -> [StreakSegment] {
         var segments: [StreakSegment] = []
-        let daysInYear = AppConfig.daysInCurrentYear
+        let daysInYear = daysInDisplayYear
 
         for activityIndex in activities.indices {
             var day = 1
@@ -293,22 +336,28 @@ struct YearGridView: View {
                 if isActive {
                     // Start of a streak
                     let startDay = day
-                    var length = 0
+                    var visibleLength = 0
 
                     while day <= daysInYear {
                         let d = yearData[day] ?? []
                         let dayIntensity = activityIndex < d.count ? d[activityIndex] : 0
                         if dayIntensity > 0 {
-                            length += 1
+                            visibleLength += 1
                             day += 1
                         } else {
                             break
                         }
                     }
 
-                    // Only show number if streak is 2+ days
-                    if length >= 2 {
-                        segments.append(StreakSegment(activityIndex: activityIndex, startDay: startDay, length: length))
+                    // If streak starts on day 1, add carryover from previous year
+                    var totalLength = visibleLength
+                    if startDay == 1 {
+                        totalLength += previousYearCarryover(for: activityIndex)
+                    }
+
+                    // Only show number if total streak is 2+ days
+                    if totalLength >= 2 {
+                        segments.append(StreakSegment(activityIndex: activityIndex, startDay: startDay, visibleLength: visibleLength, totalLength: totalLength))
                     }
                 } else {
                     day += 1
@@ -325,9 +374,10 @@ struct YearGridView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // Month markers (only in expanded mode)
                     if isExpanded {
+                        let monthStarts = monthStartDays(for: displayYear)
                         LazyHStack(alignment: .top, spacing: 0) {
-                            ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
-                                if let label = Self.monthStartDaysCache[day] {
+                            ForEach(1...daysInDisplayYear, id: \.self) { day in
+                                if let label = monthStarts[day] {
                                     Text(label)
                                         .font(.caption)
                                         .foregroundColor(.gray)
@@ -348,12 +398,13 @@ struct YearGridView: View {
                     // Add extra height for selection border (highlightPadding + strokeWidth on top and bottom)
                     let selectionExtraHeight: CGFloat = (highlightPadding + strokeWidth) * 2
                     let gridHeight = CGFloat(activities.count) * (cellSize + cellSpacing) - cellSpacing + gridPadding * 2 + selectionExtraHeight
+                    let monthStarts = monthStartDays(for: displayYear)
                     ZStack(alignment: .topLeading) {
                         LazyHStack(alignment: .top, spacing: 0) {
-                            ForEach(1...AppConfig.daysInCurrentYear, id: \.self) { day in
+                            ForEach(1...daysInDisplayYear, id: \.self) { day in
                                 let isSelected = day == selectedDayOfYear
                                 let dayData = yearData[day] ?? []
-                                let isMonthStart = Self.monthStartDaysCache[day] != nil
+                                let isMonthStart = monthStarts[day] != nil
                                 DayColumnView(
                                     day: day,
                                     dayData: dayData,
@@ -376,9 +427,10 @@ struct YearGridView: View {
                         if isExpanded && showStreakOverlay {
                             let segments = calculateStreakSegments()
                             ForEach(segments) { segment in
-                                let xPos = CGFloat(segment.startDay - 1) * cellSize + CGFloat(segment.length) * cellSize / 2
+                                // Position based on visible length, display total length
+                                let xPos = CGFloat(segment.startDay - 1) * cellSize + CGFloat(segment.visibleLength) * cellSize / 2
                                 let yPos = gridPadding + CGFloat(segment.activityIndex) * (cellSize + cellSpacing) + cellSize / 2
-                                Text("\(segment.length)")
+                                Text("\(segment.totalLength)")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundColor(.white)
                                     .shadow(color: .black, radius: 1, x: 0, y: 0)
@@ -420,17 +472,20 @@ struct ExpandedYearGridView: View {
     private let cellSize: CGFloat = 16
     private let cellSpacing: CGFloat = 4
 
-    private var todayDayOfYear: Int {
+    private var displayYear: Int {
+        Calendar.current.component(.year, from: selectedDate)
+    }
+
+    private var selectedDayOfYear: Int {
         let calendar = Calendar.current
-        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: Date()))!
-        return calendar.dateComponents([.day], from: startOfYear, to: Date()).day! + 1
+        let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: selectedDate))!
+        return calendar.dateComponents([.day], from: startOfYear, to: selectedDate).day! + 1
     }
 
     private func dateFromDayOfYear(_ dayOfYear: Int) -> Date {
         let calendar = Calendar.current
-        let year = calendar.component(.year, from: Date())
         var dateComponents = DateComponents()
-        dateComponents.year = year
+        dateComponents.year = displayYear
         dateComponents.day = dayOfYear
         return calendar.date(from: dateComponents) ?? Date()
     }
@@ -451,17 +506,62 @@ struct ExpandedYearGridView: View {
         }
     }
 
+    private func isActivityLoggedToday(for activityIndex: Int) -> Bool {
+        let dateKey = dataManager.dateKey(from: selectedDate)
+        let dayData = dataManager.allData[dateKey] ?? [:]
+        return (dayData[activityIndex] ?? 0) > 0
+    }
+
     private func currentStreak(for activityIndex: Int) -> Int {
         var streak = 0
-        var day = todayDayOfYear
+        let calendar = Calendar.current
+        var currentDate = selectedDate
 
-        while day >= 1 {
-            let dayData = dataManager.yearData[day] ?? []
-            let intensity = activityIndex < dayData.count ? dayData[activityIndex] : 0
+        // Count backwards through dates, crossing year boundaries
+        while true {
+            let dateKey = dataManager.dateKey(from: currentDate)
+            let dayData = dataManager.allData[dateKey] ?? [:]
+            let intensity = dayData[activityIndex] ?? 0
 
             if intensity > 0 {
                 streak += 1
-                day -= 1
+                // Move to previous day
+                guard let previousDate = calendar.date(byAdding: .day, value: -1, to: currentDate) else {
+                    break
+                }
+                currentDate = previousDate
+            } else {
+                break
+            }
+        }
+
+        return streak
+    }
+
+    // Returns the streak that could be continued if today's activity is logged
+    // (i.e., the streak ending yesterday)
+    private func potentialStreak(for activityIndex: Int) -> Int {
+        var streak = 0
+        let calendar = Calendar.current
+
+        // Start from yesterday
+        guard let yesterday = calendar.date(byAdding: .day, value: -1, to: selectedDate) else {
+            return 0
+        }
+        var currentDate = yesterday
+
+        // Count backwards through dates, crossing year boundaries
+        while true {
+            let dateKey = dataManager.dateKey(from: currentDate)
+            let dayData = dataManager.allData[dateKey] ?? [:]
+            let intensity = dayData[activityIndex] ?? 0
+
+            if intensity > 0 {
+                streak += 1
+                guard let previousDate = calendar.date(byAdding: .day, value: -1, to: currentDate) else {
+                    break
+                }
+                currentDate = previousDate
             } else {
                 break
             }
@@ -555,65 +655,41 @@ struct ExpandedYearGridView: View {
                     .padding()
                 }
 
-                if showStreaks {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(activities.indices, id: \.self) { index in
-                                let streak = currentStreak(for: index)
-                                if streak > 0 {
-                                    HStack(spacing: 4) {
-                                        Circle()
-                                            .fill(activities[index].color)
-                                            .frame(width: 10, height: 10)
-                                        Text("\(streak)d")
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                            .foregroundColor(.white)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.white.opacity(0.1))
-                                    .cornerRadius(12)
-                                }
-                            }
-                        }
-                        .padding(.horizontal)
-                    }
-                    .frame(height: 30)
-                }
-
                 HStack(alignment: .top, spacing: 8) {
-                    // Legend
-                    if showLegend {
-                        VStack(alignment: .trailing, spacing: 0) {
-                            // Spacer for month markers row
-                            Color.clear.frame(height: 20)
+                    // Legend (left side)
+                    VStack(alignment: .trailing, spacing: 0) {
+                        // Spacer for month markers row
+                        Color.clear.frame(height: 20)
 
-                            // Legend items aligned with grid rows
-                            let gridPadding: CGFloat = cellSpacing / 2 + 1
-                            VStack(alignment: .trailing, spacing: cellSpacing) {
-                                ForEach(activities.indices, id: \.self) { index in
-                                    HStack(spacing: 4) {
-                                        Text(trimTrailingEmoji(activities[index].name))
-                                            .font(.system(size: 9))
-                                            .foregroundColor(.gray)
-                                            .lineLimit(1)
-                                        Circle()
-                                            .fill(activities[index].color)
-                                            .frame(width: 8, height: 8)
-                                    }
-                                    .frame(height: cellSize)
+                        // Legend items aligned with grid rows
+                        let gridPadding: CGFloat = cellSpacing / 2 + 1
+                        VStack(alignment: .trailing, spacing: cellSpacing) {
+                            ForEach(activities.indices, id: \.self) { index in
+                                HStack(spacing: 4) {
+                                    Text(trimTrailingEmoji(activities[index].name))
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.gray)
+                                        .lineLimit(1)
+                                    Circle()
+                                        .fill(activities[index].color)
+                                        .frame(width: 8, height: 8)
                                 }
+                                .frame(height: cellSize)
                             }
-                            .padding(.top, gridPadding)
                         }
-                        .frame(width: 70)
+                        .padding(.top, gridPadding)
                     }
+                    .frame(width: showLegend ? 70 : 0)
+                    .opacity(showLegend ? 1 : 0)
+                    .clipped()
+                    .drawingGroup()
+                    .animation(.easeInOut(duration: 0.25), value: showLegend)
 
                     YearGridView(
                         yearData: dataManager.yearData,
                         selectedDate: selectedDate,
                         activities: activities,
+                        dataManager: dataManager,
                         isExpanded: true,
                         isEditMode: isEditMode,
                         showGridLines: showGridLines,
@@ -622,10 +698,47 @@ struct ExpandedYearGridView: View {
                             toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
                         }
                     )
+
+                    // Streak badges (right side)
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Spacer for month markers row
+                        Color.clear.frame(height: 20)
+
+                        // Streak items aligned with grid rows
+                        let gridPadding: CGFloat = cellSpacing / 2 + 1
+                        VStack(alignment: .leading, spacing: cellSpacing) {
+                            ForEach(activities.indices, id: \.self) { index in
+                                let isLogged = isActivityLoggedToday(for: index)
+                                let streak = currentStreak(for: index)
+                                let potential = potentialStreak(for: index)
+
+                                HStack(spacing: 4) {
+                                    if isLogged && streak > 0 {
+                                        // Active streak - full opacity
+                                        Text("\(streak)d")
+                                            .font(.system(size: 9, weight: .medium))
+                                            .foregroundColor(.white)
+                                    } else if !isLogged && potential > 0 {
+                                        // Continuable streak - lower opacity
+                                        Text("\(potential)d")
+                                            .font(.system(size: 9, weight: .medium))
+                                            .foregroundColor(.white.opacity(0.4))
+                                    }
+                                }
+                                .frame(height: cellSize)
+                            }
+                        }
+                        .padding(.top, gridPadding)
+                    }
+                    .frame(width: showStreaks ? 30 : 0)
+                    .opacity(showStreaks ? 1 : 0)
+                    .clipped()
+                    .drawingGroup()
+                    .animation(.easeInOut(duration: 0.25), value: showStreaks)
                 }
                 .padding(.leading, 8)
                 .padding(.trailing, 16)
-                .padding(.top, showStreaks ? 20 : 40)
+                .padding(.top, 40)
 
                 if isEditMode {
                     Text("Tap cells to toggle")
@@ -642,6 +755,17 @@ struct ExpandedYearGridView: View {
                 withAnimation {
                     isPresented = false
                 }
+            }
+        }
+        .onAppear {
+            // Pre-warm collapsed states to avoid first-toggle stutter
+            let legendState = showLegend
+            let streaksState = showStreaks
+            showLegend = false
+            showStreaks = false
+            DispatchQueue.main.async {
+                showLegend = legendState
+                showStreaks = streaksState
             }
         }
     }
@@ -765,15 +889,15 @@ class LocalDataManager: ObservableObject {
         saveData()
     }
 
-    func fetchYearData(activitiesCount: Int = 13) {
+    func fetchYearData(activitiesCount: Int = 13, forYear year: Int? = nil) {
         let calendar = Calendar.current
-        let year = calendar.component(.year, from: Date())
+        let targetYear = year ?? calendar.component(.year, from: Date())
         var newYearData: [Int: [Int]] = [:]
 
         // Build year data from stored data
-        for day in 1...AppConfig.daysInYear(year) {
+        for day in 1...AppConfig.daysInYear(targetYear) {
             var dateComponents = DateComponents()
-            dateComponents.year = year
+            dateComponents.year = targetYear
             dateComponents.day = day
 
             if let date = calendar.date(from: dateComponents) {
@@ -883,14 +1007,29 @@ class LocalDataManager: ObservableObject {
         }
     }
 
+    // Import functionality
+    func mergeImportedData(_ importedData: [String: [Int: Int]], activitiesCount: Int) {
+        for (dateKey, dayData) in importedData {
+            if allData[dateKey] == nil {
+                allData[dateKey] = [:]
+            }
+            for (activityIndex, intensity) in dayData {
+                allData[dateKey]?[activityIndex] = intensity
+            }
+        }
+        saveData()
+
+        // Refresh yearData for the current view
+        fetchYearData(activitiesCount: activitiesCount)
+    }
+
     // Export functionality
-    func exportToCSV(activities: [Activity]) -> String {
+    func exportToCSV(activities: [Activity], forYear year: Int) -> String {
         var csv = "Date," + activities.map { $0.name }.joined(separator: ",") + "\n"
 
         let calendar = Calendar.current
-        let year = calendar.component(.year, from: Date())
 
-        // Generate CSV for all days of the current year
+        // Generate CSV for all days of the specified year
         for day in 1...AppConfig.daysInYear(year) {
             var dateComponents = DateComponents()
             dateComponents.year = year
@@ -935,15 +1074,25 @@ class GoogleSheetsExporter: ObservableObject {
         set { defaults.set(newValue, forKey: savedSpreadsheetKey) }
     }
 
+    private let requiredScope = "https://www.googleapis.com/auth/spreadsheets"
+
     init() {
         // Restore previous sign-in
         GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
+            guard let self = self else { return }
             if let user = user {
-                let service = GTLRSheetsService()
-                service.authorizer = user.fetcherAuthorizer
-                self?.service = service
-                DispatchQueue.main.async {
-                    self?.isSignedIn = true
+                // Check if user has the required spreadsheets scope
+                let grantedScopes = user.grantedScopes ?? []
+                if grantedScopes.contains(self.requiredScope) {
+                    let service = GTLRSheetsService()
+                    service.authorizer = user.fetcherAuthorizer
+                    self.service = service
+                    DispatchQueue.main.async {
+                        self.isSignedIn = true
+                    }
+                } else {
+                    // User is signed in but missing scope - they'll need to sign in again
+                    GIDSignIn.sharedInstance.signOut()
                 }
             }
         }
@@ -958,7 +1107,7 @@ class GoogleSheetsExporter: ObservableObject {
         GIDSignIn.sharedInstance.signIn(
             withPresenting: presentingViewController,
             hint: nil,
-            additionalScopes: ["https://www.googleapis.com/auth/spreadsheets"]
+            additionalScopes: [requiredScope]
         ) { [weak self] result, error in
             if let user = result?.user {
                 let service = GTLRSheetsService()
@@ -976,7 +1125,7 @@ class GoogleSheetsExporter: ObservableObject {
         }
     }
 
-    func createNewSpreadsheet(completion: @escaping (Bool, String?) -> Void) {
+    func createNewSpreadsheet(forYear year: Int, completion: @escaping (Bool, String?) -> Void) {
         guard let service = service else {
             exportStatus = "Please sign in first"
             completion(false, nil)
@@ -988,7 +1137,7 @@ class GoogleSheetsExporter: ObservableObject {
 
         let spreadsheet = GTLRSheets_Spreadsheet()
         spreadsheet.properties = GTLRSheets_SpreadsheetProperties()
-        spreadsheet.properties?.title = "Color Journal Export - \(Date().formatted(date: .abbreviated, time: .omitted))"
+        spreadsheet.properties?.title = "Habituality Export - \(year)"
 
         let query = GTLRSheetsQuery_SpreadsheetsCreate.query(withObject: spreadsheet)
 
@@ -1017,7 +1166,7 @@ class GoogleSheetsExporter: ObservableObject {
         }
     }
 
-    func exportToGoogleSheets(dataManager: LocalDataManager, activitiesManager: ActivitiesManager, spreadsheetId: String, completion: @escaping (Bool, String) -> Void) {
+    func exportToGoogleSheets(dataManager: LocalDataManager, activitiesManager: ActivitiesManager, spreadsheetId: String, forYear year: Int, completion: @escaping (Bool, String) -> Void) {
         guard let service = service else {
             completion(false, "Please sign in to Google first")
             return
@@ -1027,7 +1176,6 @@ class GoogleSheetsExporter: ObservableObject {
         exportStatus = "Exporting data with colors..."
 
         let calendar = Calendar.current
-        let year = calendar.component(.year, from: Date())
         let daysInYear = AppConfig.daysInYear(year)
         let totalColumns = daysInYear + 1  // +1 for activity names column
 
@@ -1070,9 +1218,11 @@ class GoogleSheetsExporter: ObservableObject {
         let headerRow = GTLRSheets_RowData()
         var headerCells: [GTLRSheets_CellData] = []
 
-        // Empty first cell (top-left corner)
-        let emptyCell = GTLRSheets_CellData()
-        headerCells.append(emptyCell)
+        // Year in first cell (A1) for import compatibility
+        let yearCell = GTLRSheets_CellData()
+        yearCell.userEnteredValue = GTLRSheets_ExtendedValue()
+        yearCell.userEnteredValue?.numberValue = NSNumber(value: year)
+        headerCells.append(yearCell)
 
         // Date headers for all days
         for day in 1...daysInYear {
@@ -1226,6 +1376,137 @@ class GoogleSheetsExporter: ObservableObject {
 
     func getSpreadsheetUrl(id: String) -> String {
         return "https://docs.google.com/spreadsheets/d/\(id)"
+    }
+
+    func importFromGoogleSheets(spreadsheetId: String, forYear year: Int, activitiesManager: ActivitiesManager, completion: @escaping (Bool, String, [String: [Int: Int]]?) -> Void) {
+        guard let service = service else {
+            completion(false, "Please sign in to Google first", nil)
+            return
+        }
+
+        isExporting = true
+        exportStatus = "Reading spreadsheet..."
+
+        // Read all data from the first sheet
+        let range = "A:ZZZ"  // Read all columns
+        let query = GTLRSheetsQuery_SpreadsheetsValuesGet.query(withSpreadsheetId: spreadsheetId, range: range)
+
+        service.executeQuery(query) { [weak self] (ticket, result, error) in
+            DispatchQueue.main.async {
+                self?.isExporting = false
+
+                if let error = error {
+                    let errorMsg = error.localizedDescription
+                    print("Import error: \(errorMsg)")
+
+                    let userMessage: String
+                    if errorMsg.contains("permission") || errorMsg.contains("access") {
+                        userMessage = "Permission denied. Please make sure you have access to this spreadsheet."
+                    } else if errorMsg.contains("not found") || errorMsg.contains("404") {
+                        userMessage = "Spreadsheet not found. Please check the URL and try again."
+                    } else {
+                        userMessage = "Import failed. Please try again."
+                    }
+                    completion(false, userMessage, nil)
+                    return
+                }
+
+                guard let valueRange = result as? GTLRSheets_ValueRange,
+                      let rows = valueRange.values as? [[Any]],
+                      rows.count > 1 else {
+                    completion(false, "No data found in spreadsheet", nil)
+                    return
+                }
+
+                // Parse the data
+                let headerRow = rows[0]
+                let calendar = Calendar.current
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+
+                // Read year from A1 (first cell), fall back to parameter if not found
+                var importYear = year
+                if let firstCell = headerRow.first {
+                    if let yearNum = firstCell as? Int {
+                        importYear = yearNum
+                    } else if let yearDouble = firstCell as? Double {
+                        importYear = Int(yearDouble)
+                    } else if let yearStr = firstCell as? String, let yearInt = Int(yearStr) {
+                        importYear = yearInt
+                    }
+                }
+
+                // Build date mapping from column index to date key
+                var columnToDateKey: [Int: String] = [:]
+                for (colIndex, cell) in headerRow.enumerated() {
+                    if colIndex == 0 { continue }  // Skip year cell (A1)
+                    guard let dateStr = cell as? String else { continue }
+
+                    // Parse M/d format (e.g., "1/15" or "12/31")
+                    let parts = dateStr.split(separator: "/")
+                    if parts.count == 2,
+                       let month = Int(parts[0]),
+                       let day = Int(parts[1]) {
+                        var components = DateComponents()
+                        components.year = importYear
+                        components.month = month
+                        components.day = day
+                        if let date = calendar.date(from: components) {
+                            columnToDateKey[colIndex] = dateFormatter.string(from: date)
+                        }
+                    }
+                }
+
+                // Parse activity rows
+                var importedData: [String: [Int: Int]] = [:]  // dateKey -> [activityIndex: intensity]
+                let activities = activitiesManager.activities
+
+                for rowIndex in 1..<rows.count {
+                    let row = rows[rowIndex]
+                    guard row.count > 0,
+                          let activityName = row[0] as? String else { continue }
+
+                    // Find matching activity index
+                    guard let activityIndex = activities.firstIndex(where: { $0.name == activityName }) else {
+                        continue  // Skip activities that don't exist in the app
+                    }
+
+                    // Parse each cell
+                    for colIndex in 1..<row.count {
+                        guard let dateKey = columnToDateKey[colIndex] else { continue }
+                        let cellValue = row[colIndex]
+
+                        var intensity = 0
+                        if let strValue = cellValue as? String {
+                            if strValue == "✓" || strValue.lowercased() == "x" || strValue == "1" {
+                                intensity = 1
+                            } else if let intValue = Int(strValue), intValue > 0 {
+                                intensity = min(intValue, 3)  // Cap at 3
+                            }
+                        } else if let numValue = cellValue as? Int, numValue > 0 {
+                            intensity = min(numValue, 3)
+                        } else if let numValue = cellValue as? Double, numValue > 0 {
+                            intensity = min(Int(numValue), 3)
+                        }
+
+                        if intensity > 0 {
+                            if importedData[dateKey] == nil {
+                                importedData[dateKey] = [:]
+                            }
+                            importedData[dateKey]?[activityIndex] = intensity
+                        }
+                    }
+                }
+
+                if importedData.isEmpty {
+                    completion(false, "No matching activity data found. Make sure activity names match.", nil)
+                } else {
+                    self?.exportStatus = "Import complete!"
+                    let daysImported = importedData.count
+                    completion(true, "Found \(daysImported) days of \(importYear) data!", importedData)
+                }
+            }
+        }
     }
 }
 
@@ -1456,7 +1737,6 @@ struct ContentView: View {
     @State private var showDatePicker = false
     @State private var animatingButtons: Set<String> = []
     @State private var particleButtons: Set<String> = []
-    @State private var showExportSheet = false
     @State private var showSettingsSheet = false
     @State private var showExpandedGrid = false
 
@@ -1482,23 +1762,21 @@ struct ContentView: View {
 
     var body: some View {
         VStack {
-            // Settings/Export buttons in top-right
+            // Settings button in top-right
             HStack {
                 Spacer()
                 Button(action: {
                     showSettingsSheet = true
                 }) {
-                    Image(systemName: "gearshape")
-                        .imageScale(.large)
-                        .padding()
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.gray)
+                        .padding(8)
+                        .background(Color.gray.opacity(0.15))
+                        .clipShape(Circle())
                 }
-                Button(action: {
-                    showExportSheet = true
-                }) {
-                    Image(systemName: "square.and.arrow.up")
-                        .imageScale(.large)
-                        .padding()
-                }
+                .padding(.trailing, 12)
+                .padding(.top, 4)
             }
 
             ScrollView {
@@ -1594,7 +1872,8 @@ struct ContentView: View {
                 let currentYear = calendar.component(.year, from: Date())
                 let dateRange: ClosedRange<Date> = {
                     let calendar = Calendar.current
-                    let startComponents = DateComponents(year: currentYear, month: 1, day: 1)
+                    // Allow going back to previous years (starting from 2025)
+                    let startComponents = DateComponents(year: 2025, month: 1, day: 1)
                     let endComponents = DateComponents(year: currentYear, month: 12, day: 31, hour: 23, minute: 59, second: 59)
                     return calendar.date(from:startComponents)!
                         ...
@@ -1627,21 +1906,27 @@ struct ContentView: View {
         .onChange(of: selectedDate) { oldValue, newValue in
             // Fetch cell statuses whenever date changes
             dataManager.fetchCellStatus(date: newValue, activitiesCount: activitiesManager.activities.count)
+            // Fetch year data if the year changed
+            let calendar = Calendar.current
+            let oldYear = calendar.component(.year, from: oldValue)
+            let newYear = calendar.component(.year, from: newValue)
+            if oldYear != newYear {
+                dataManager.fetchYearData(activitiesCount: activitiesManager.activities.count, forYear: newYear)
+            }
         }
         .onChange(of: activitiesManager.activities.count) { oldValue, newValue in
             // Refresh data when activities change
-            dataManager.fetchYearData(activitiesCount: newValue)
+            let year = Calendar.current.component(.year, from: selectedDate)
+            dataManager.fetchYearData(activitiesCount: newValue, forYear: year)
             dataManager.fetchCellStatus(date: selectedDate, activitiesCount: newValue)
         }
         .onAppear {
+            let year = Calendar.current.component(.year, from: selectedDate)
             dataManager.fetchCellStatus(date: selectedDate, activitiesCount: activitiesManager.activities.count)
-            dataManager.fetchYearData(activitiesCount: activitiesManager.activities.count)
-        }
-        .sheet(isPresented: $showExportSheet) {
-            ExportView(dataManager: dataManager, activitiesManager: activitiesManager)
+            dataManager.fetchYearData(activitiesCount: activitiesManager.activities.count, forYear: year)
         }
         .sheet(isPresented: $showSettingsSheet) {
-            SettingsView(activitiesManager: activitiesManager, dataManager: dataManager)
+            SettingsView(activitiesManager: activitiesManager, dataManager: dataManager, selectedYear: Calendar.current.component(.year, from: selectedDate))
         }
         .fullScreenCover(isPresented: $showExpandedGrid) {
             ExpandedYearGridView(
@@ -1657,6 +1942,7 @@ struct ContentView: View {
 struct ExportView: View {
     @ObservedObject var dataManager: LocalDataManager
     @ObservedObject var activitiesManager: ActivitiesManager
+    let selectedYear: Int
     @Environment(\.dismiss) var dismiss
     @State private var showShareSheet = false
     @State private var fileURL: URL?
@@ -1670,7 +1956,7 @@ struct ExportView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    Text("Export Your Data")
+                    Text("Export \(String(selectedYear)) Data")
                         .font(.title)
                         .padding()
 
@@ -1733,10 +2019,10 @@ struct ExportView: View {
                         } else {
                             // Create new spreadsheet
                             Button(action: {
-                                sheetsExporter.createNewSpreadsheet { success, id in
+                                sheetsExporter.createNewSpreadsheet(forYear: selectedYear) { success, id in
                                     if success, let spreadsheetId = id {
                                         // Now export to the newly created sheet
-                                        sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: spreadsheetId) { exportSuccess, message in
+                                        sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: spreadsheetId, forYear: selectedYear) { exportSuccess, message in
                                             if exportSuccess {
                                                 createdSheetUrl = sheetsExporter.getSpreadsheetUrl(id: spreadsheetId)
                                                 alertMessage = "Created and exported!\n\nOpen in Google Sheets?"
@@ -1795,7 +2081,7 @@ struct ExportView: View {
 
                                 Button(action: {
                                     let extractedId = extractSpreadsheetId(from: spreadsheetId)
-                                    sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: extractedId) { success, message in
+                                    sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: extractedId, forYear: selectedYear) { success, message in
                                         alertMessage = message
                                         showAlert = true
                                         if success {
@@ -1859,10 +2145,10 @@ struct ExportView: View {
     }
 
     private func exportToFile() {
-        let csvString = dataManager.exportToCSV(activities: activitiesManager.activities)
+        let csvString = dataManager.exportToCSV(activities: activitiesManager.activities, forYear: selectedYear)
 
         // Create a temporary file
-        let fileName = "colorjournal_export_\(Date().timeIntervalSince1970).csv"
+        let fileName = "Habituality_\(selectedYear)_export.csv"
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
 
         do {
@@ -1887,13 +2173,159 @@ struct ExportView: View {
     }
 }
 
+struct ImportView: View {
+    @ObservedObject var dataManager: LocalDataManager
+    @ObservedObject var activitiesManager: ActivitiesManager
+    let selectedYear: Int
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var sheetsExporter = GoogleSheetsExporter()
+    @State private var spreadsheetId: String = ""
+    @State private var showAlert = false
+    @State private var alertMessage = ""
+    @State private var showConfirmImport = false
+    @State private var pendingImportData: [String: [Int: Int]]?
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    Text("Import \(String(selectedYear)) Data")
+                        .font(.title)
+                        .padding()
+
+                    Text("Import data from a previously exported Google Sheet. Activity names must match exactly.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+
+                    if !sheetsExporter.isSignedIn {
+                        Button(action: {
+                            sheetsExporter.signIn { success in
+                                if !success {
+                                    alertMessage = "Sign in failed. Please try again."
+                                    showAlert = true
+                                }
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "person.circle")
+                                Text("Sign in with Google")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        .padding(.horizontal)
+                    } else {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Signed in to Google")
+                                .font(.subheadline)
+                                .foregroundColor(.green)
+                                .padding(.horizontal)
+
+                            TextField("Paste Google Sheets URL or ID", text: $spreadsheetId)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .padding(.horizontal)
+
+                            Button(action: {
+                                let extractedId = extractSpreadsheetId(from: spreadsheetId)
+                                sheetsExporter.importFromGoogleSheets(
+                                    spreadsheetId: extractedId,
+                                    forYear: selectedYear,
+                                    activitiesManager: activitiesManager
+                                ) { success, message, importedData in
+                                    if success, let data = importedData {
+                                        pendingImportData = data
+                                        alertMessage = message
+                                        showConfirmImport = true
+                                    } else {
+                                        alertMessage = message
+                                        showAlert = true
+                                    }
+                                }
+                            }) {
+                                HStack {
+                                    if sheetsExporter.isExporting {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                            .padding(.trailing, 5)
+                                    }
+                                    Image(systemName: "square.and.arrow.down")
+                                    Text("Import Data")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(spreadsheetId.isEmpty ? Color.gray : Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                            }
+                            .disabled(spreadsheetId.isEmpty || sheetsExporter.isExporting)
+                            .padding(.horizontal)
+
+                            if !sheetsExporter.exportStatus.isEmpty {
+                                Text(sheetsExporter.exportStatus)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal)
+                            }
+                        }
+                    }
+
+                    Spacer()
+                }
+                .padding(.top)
+            }
+            .navigationTitle("Import")
+            .navigationBarItems(trailing: Button("Done") { dismiss() })
+        }
+        .alert("Import Result", isPresented: $showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(alertMessage)
+        }
+        .alert("Confirm Import", isPresented: $showConfirmImport) {
+            Button("Cancel", role: .cancel) {
+                pendingImportData = nil
+            }
+            Button("Import") {
+                if let data = pendingImportData {
+                    dataManager.mergeImportedData(data, activitiesCount: activitiesManager.activities.count)
+                    pendingImportData = nil
+                    alertMessage = "Data imported successfully!"
+                    showAlert = true
+                }
+            }
+        } message: {
+            Text("\(alertMessage)\n\nThis will merge with your existing data. Continue?")
+        }
+    }
+
+    private func extractSpreadsheetId(from input: String) -> String {
+        if input.contains("docs.google.com/spreadsheets") {
+            let components = input.components(separatedBy: "/")
+            if let dIndex = components.firstIndex(of: "d"), dIndex + 1 < components.count {
+                return components[dIndex + 1]
+            }
+        }
+        return input.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var activitiesManager: ActivitiesManager
     @ObservedObject var dataManager: LocalDataManager
+    let selectedYear: Int
     @Environment(\.dismiss) var dismiss
     @State private var editingActivity: Activity?
     @State private var showingEditSheet = false
     @State private var showingClearDataAlert = false
+    @State private var showingExportSheet = false
+    @State private var showingImportSheet = false
 
     var body: some View {
         NavigationView {
@@ -1957,6 +2389,28 @@ struct SettingsView: View {
 
                 Section {
                     Button(action: {
+                        showingExportSheet = true
+                    }) {
+                        HStack {
+                            Image(systemName: "square.and.arrow.up")
+                                .foregroundColor(.blue)
+                            Text("Export Data")
+                                .foregroundColor(.primary)
+                        }
+                    }
+
+                    Button(action: {
+                        showingImportSheet = true
+                    }) {
+                        HStack {
+                            Image(systemName: "square.and.arrow.down")
+                                .foregroundColor(.green)
+                            Text("Import from Google Sheets")
+                                .foregroundColor(.primary)
+                        }
+                    }
+
+                    Button(action: {
                         showingClearDataAlert = true
                     }) {
                         HStack {
@@ -1969,7 +2423,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Data Management")
                 } footer: {
-                    Text("This will permanently delete all your activity tracking data. Your custom activities list will be preserved.")
+                    Text("Export or import your data, or clear all tracking data.")
                 }
             }
             .navigationTitle("Settings")
@@ -1995,6 +2449,12 @@ struct SettingsView: View {
                     activity: activity
                 )
             }
+        }
+        .sheet(isPresented: $showingExportSheet) {
+            ExportView(dataManager: dataManager, activitiesManager: activitiesManager, selectedYear: selectedYear)
+        }
+        .sheet(isPresented: $showingImportSheet) {
+            ImportView(dataManager: dataManager, activitiesManager: activitiesManager, selectedYear: selectedYear)
         }
     }
 }

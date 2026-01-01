@@ -1,6 +1,6 @@
 //
-//  colorjournalApp.swift
-//  colorjournal
+//  HabitualityApp.swift
+//  Habituality
 //
 //  Created by Justin Hanneman on 12/30/24.
 //
@@ -8,7 +8,7 @@
 import SwiftUI
 
 @main
-struct ColorJournalApp: App {
+struct HabitualityApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
