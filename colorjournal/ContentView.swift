@@ -146,6 +146,7 @@ struct DayColumnView: View {
     let showGridLines: Bool
     let isMonthStart: Bool
     let isLastDay: Bool
+    let isExpanded: Bool
     let onCellTap: ((Int, Int) -> Void)?
 
     private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
@@ -184,7 +185,9 @@ struct DayColumnView: View {
                     context.fill(Path(rect), with: .color(activities[index].color))
                 } else {
                     let rect = CGRect(x: 0, y: y, width: size.width, height: cellSize)
-                    context.fill(Path(rect), with: .color(Color.black))
+                    // Expanded view has black background; compact adapts to system theme
+                    let emptyColor = isExpanded ? Color.black : Color(.systemBackground)
+                    context.fill(Path(rect), with: .color(emptyColor))
                 }
             }
 
@@ -263,8 +266,17 @@ struct YearGridView: View {
     var zoomScale: CGFloat = 1.0
     var onCellTap: ((Int, Int) -> Void)? = nil  // (dayOfYear, activityIndex)
 
-    private var cellSize: CGFloat { (isExpanded ? 16 : 3) * zoomScale }
-    private var cellSpacing: CGFloat { (isExpanded ? 4 : 1) * zoomScale }
+    // Scale up compact cells when there are fewer activities
+    private var compactScaleFactor: CGFloat {
+        let count = activities.count
+        if count <= 2 { return 1.6 }
+        if count <= 4 { return 1.4 }
+        if count <= 6 { return 1.2 }
+        return 1.0
+    }
+
+    private var cellSize: CGFloat { (isExpanded ? 16 : 3 * compactScaleFactor) * zoomScale }
+    private var cellSpacing: CGFloat { (isExpanded ? 4 : 1 * compactScaleFactor) * zoomScale }
     private var highlightPadding: CGFloat { isExpanded ? 1 : 1 }
     private var strokeWidth: CGFloat { isExpanded ? 2 : 1 }
 
@@ -438,6 +450,7 @@ struct YearGridView: View {
                                     showGridLines: showGridLines,
                                     isMonthStart: isExpanded && isMonthStart,
                                     isLastDay: day == daysInDisplayYear,
+                                    isExpanded: isExpanded,
                                     onCellTap: onCellTap
                                 )
                                 .id(day)
@@ -1001,7 +1014,7 @@ struct ExpandedYearGridView: View {
                                 }
                             }
                         }
-                        .frame(maxHeight: 300)
+                        .frame(maxHeight: 320)
                     }
                     .background(Color.white.opacity(0.08))
                     .cornerRadius(10)
@@ -1915,6 +1928,7 @@ struct ActivityButton: View {
     let isAnimating: Bool
     @Binding var isParticleAnimating: Bool
     let needsDarkText: Bool
+    let buttonHeight: CGFloat
     let onTap: () -> Void
     let onSwipeRight: () -> Void
     let onSwipeLeft: () -> Void
@@ -1941,7 +1955,7 @@ struct ActivityButton: View {
                         .padding(.trailing, 8)
                 }
             }
-            .frame(height: 40)
+            .frame(height: buttonHeight)
             .frame(width: 250)
             .background(activity.color)
             .cornerRadius(8)
@@ -1953,7 +1967,7 @@ struct ActivityButton: View {
             // Particle overlay
             ParticleView(color: activity.color, isAnimating: $isParticleAnimating)
         }
-        .frame(width: 250, height: 40)
+        .frame(width: 250, height: buttonHeight)
         .contentShape(Rectangle())
         .simultaneousGesture(
             DragGesture(minimumDistance: 20)
@@ -2009,6 +2023,15 @@ struct ContentView: View {
         return formatter
     }()
 
+    // Scale up buttons when there are fewer activities
+    private var buttonHeight: CGFloat {
+        let count = activitiesManager.activities.count
+        if count <= 2 { return 52 }
+        if count <= 4 { return 46 }
+        if count <= 6 { return 43 }
+        return 40
+    }
+
     func needsDarkText(for color: Color) -> Bool {
         let uiColor = UIColor(color)
         var red: CGFloat = 0
@@ -2063,6 +2086,7 @@ struct ContentView: View {
                                         }
                                     ),
                                     needsDarkText: needsDarkText(for: activity.color),
+                                    buttonHeight: buttonHeight,
                                     onTap: {
                                         withAnimation(.spring(response: 0.15, dampingFraction: 0.4)) {
                                             animatingButtons.insert(activity.name)
