@@ -260,10 +260,11 @@ struct YearGridView: View {
     var isEditMode: Bool = false
     var showGridLines: Bool = false
     var showStreakOverlay: Bool = false
+    var zoomScale: CGFloat = 1.0
     var onCellTap: ((Int, Int) -> Void)? = nil  // (dayOfYear, activityIndex)
 
-    private var cellSize: CGFloat { isExpanded ? 16 : 3 }
-    private var cellSpacing: CGFloat { isExpanded ? 4 : 1 }
+    private var cellSize: CGFloat { (isExpanded ? 16 : 3) * zoomScale }
+    private var cellSpacing: CGFloat { (isExpanded ? 4 : 1) * zoomScale }
     private var highlightPadding: CGFloat { isExpanded ? 1 : 1 }
     private var strokeWidth: CGFloat { isExpanded ? 2 : 1 }
 
@@ -279,6 +280,16 @@ struct YearGridView: View {
         let calendar = Calendar.current
         let startOfYear = calendar.date(from: calendar.dateComponents([.year], from: selectedDate))!
         return calendar.dateComponents([.day], from: startOfYear, to: selectedDate).day! + 1
+    }
+
+    // Get day of month from day of year
+    private func dayOfMonth(from dayOfYear: Int) -> Int {
+        let calendar = Calendar.current
+        var dateComponents = DateComponents()
+        dateComponents.year = displayYear
+        dateComponents.day = dayOfYear
+        let date = calendar.date(from: dateComponents) ?? Date()
+        return calendar.component(.day, from: date)
     }
 
     // Calculate month start days for a specific year
@@ -399,7 +410,7 @@ struct YearGridView: View {
                                 }
                             }
                         }
-                        .frame(height: 16)
+                        .frame(height: 16 * zoomScale)
                     }
 
                     // Day grid
@@ -438,7 +449,17 @@ struct YearGridView: View {
                             let segments = calculateStreakSegments()
                             ForEach(segments) { segment in
                                 // Position based on visible length, display total length
-                                let xPos = CGFloat(segment.startDay - 1) * cellSize + CGFloat(segment.visibleLength) * cellSize / 2
+                                // Account for selected day column being 2px wider
+                                let selectedDayOffset: CGFloat = {
+                                    if selectedDayOfYear < segment.startDay {
+                                        return 2  // Selection is before streak, shifts entire streak
+                                    } else if selectedDayOfYear < segment.startDay + segment.visibleLength {
+                                        return 1  // Selection is within streak, shifts center by half
+                                    } else {
+                                        return 0  // Selection is after streak, no effect
+                                    }
+                                }()
+                                let xPos = CGFloat(segment.startDay - 1) * cellSize + CGFloat(segment.visibleLength) * cellSize / 2 + selectedDayOffset
                                 let yPos = gridPadding + CGFloat(segment.activityIndex) * (cellSize + cellSpacing) + cellSize / 2
                                 Text("\(segment.totalLength)")
                                     .font(.system(size: 9, weight: .bold))
@@ -451,6 +472,19 @@ struct YearGridView: View {
                         }
                     }
                     .frame(height: gridHeight)
+
+                    // Day numbers below cells (only in expanded mode)
+                    if isExpanded {
+                        LazyHStack(alignment: .top, spacing: 0) {
+                            ForEach(1...daysInDisplayYear, id: \.self) { day in
+                                Text("\(dayOfMonth(from: day))")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.gray.opacity(0.6))
+                                    .frame(width: cellSize, alignment: .center)
+                            }
+                        }
+                        .frame(height: 12 * zoomScale)
+                    }
                 }
             }
             .frame(height: isExpanded ? nil : 50)
@@ -475,12 +509,19 @@ struct ExpandedYearGridView: View {
     @Binding var isPresented: Bool
     @State private var isEditMode: Bool = false
     @State private var showGridLines: Bool = false
-    @State private var showStreaks: Bool = false
+    @State private var showStreaks: Bool = true
     @State private var showLegend: Bool = true
+    @State private var showStats: Bool = false
+    @State private var gridScale: CGFloat = 1.0
+    @State private var lastPinchScale: CGFloat = 1.0
 
-    // Grid layout constants (must match YearGridView)
-    private let cellSize: CGFloat = 16
-    private let cellSpacing: CGFloat = 4
+    // Grid layout constants (scaled by zoom)
+    private let baseCellSize: CGFloat = 16
+    private let baseCellSpacing: CGFloat = 4
+    private var cellSize: CGFloat { baseCellSize * gridScale }
+    private var cellSpacing: CGFloat { baseCellSpacing * gridScale }
+    private let minScale: CGFloat = 0.7
+    private let maxScale: CGFloat = 1.5
 
     private var displayYear: Int {
         Calendar.current.component(.year, from: selectedDate)
@@ -598,157 +639,275 @@ struct ExpandedYearGridView: View {
         return result
     }
 
+    // MARK: - Stats Calculations
+
+    private func allTimeStats(for activityIndex: Int) -> (longestStreak: Int, isOngoing: Bool, totalDays: Int) {
+        let calendar = Calendar.current
+        var totalDays = 0
+        var longestStreak = 0
+        var currentStreakLength = 0
+        var longestStreakEndDate: Date? = nil
+
+        // Get all dates from allData, sorted
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+
+        let sortedDates = dataManager.allData.keys
+            .compactMap { dateFormatter.date(from: $0) }
+            .sorted()
+
+        guard !sortedDates.isEmpty else {
+            return (0, false, 0)
+        }
+
+        var previousDate: Date? = nil
+
+        for date in sortedDates {
+            let dateKey = dataManager.dateKey(from: date)
+            let dayData = dataManager.allData[dateKey] ?? [:]
+            let intensity = dayData[activityIndex] ?? 0
+
+            if intensity > 0 {
+                totalDays += 1
+
+                // Check if this continues a streak
+                if let prev = previousDate,
+                   let daysBetween = calendar.dateComponents([.day], from: prev, to: date).day,
+                   daysBetween == 1 {
+                    currentStreakLength += 1
+                } else {
+                    currentStreakLength = 1
+                }
+
+                if currentStreakLength > longestStreak {
+                    longestStreak = currentStreakLength
+                    longestStreakEndDate = date
+                }
+
+                previousDate = date
+            } else {
+                previousDate = nil
+                currentStreakLength = 0
+            }
+        }
+
+        // Check if longest streak is still ongoing (ends on selectedDate or continues to today)
+        var isOngoing = false
+        if let endDate = longestStreakEndDate {
+            // Check if streak continues from endDate to selectedDate
+            var checkDate = endDate
+            var stillGoing = true
+            while stillGoing {
+                guard let nextDate = calendar.date(byAdding: .day, value: 1, to: checkDate) else { break }
+                if nextDate > selectedDate { break }
+
+                let dateKey = dataManager.dateKey(from: nextDate)
+                let dayData = dataManager.allData[dateKey] ?? [:]
+                let intensity = dayData[activityIndex] ?? 0
+
+                if intensity > 0 {
+                    checkDate = nextDate
+                } else {
+                    stillGoing = false
+                }
+            }
+            isOngoing = calendar.isDate(checkDate, inSameDayAs: selectedDate)
+        }
+
+        return (longestStreak, isOngoing, totalDays)
+    }
+
+    private func currentYearCompletionRate(for activityIndex: Int) -> Double {
+        let calendar = Calendar.current
+        let startOfYear = calendar.date(from: DateComponents(year: displayYear, month: 1, day: 1))!
+
+        // Calculate days elapsed in the year (up to selected date or today, whichever is earlier)
+        let today = Date()
+        let endDate = min(selectedDate, today)
+        let daysElapsed = max(1, (calendar.dateComponents([.day], from: startOfYear, to: endDate).day ?? 0) + 1)
+
+        // Count logged days this year
+        var loggedDays = 0
+        for dayOffset in 0..<daysElapsed {
+            guard let date = calendar.date(byAdding: .day, value: dayOffset, to: startOfYear) else { continue }
+            let dateKey = dataManager.dateKey(from: date)
+            let dayData = dataManager.allData[dateKey] ?? [:]
+            if (dayData[activityIndex] ?? 0) > 0 {
+                loggedDays += 1
+            }
+        }
+
+        return Double(loggedDays) / Double(daysElapsed)
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            VStack {
-                HStack {
-                    Button(action: {
-                        withAnimation {
-                            isEditMode.toggle()
+            ScrollView {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button(action: {
+                            withAnimation {
+                                isEditMode.toggle()
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: isEditMode ? "pencil.circle.fill" : "pencil.circle")
+                                    .font(.title2)
+                                Text(isEditMode ? "Done" : "Edit")
+                                    .font(.subheadline)
+                                    .fixedSize()
+                            }
+                            .foregroundColor(isEditMode ? .yellow : .gray)
                         }
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: isEditMode ? "pencil.circle.fill" : "pencil.circle")
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+
+                        Spacer()
+
+                        Button(action: {
+                            withAnimation {
+                                showStreaks.toggle()
+                            }
+                        }) {
+                            Image(systemName: showStreaks ? "flame.circle.fill" : "flame.circle")
                                 .font(.title2)
-                            Text(isEditMode ? "Done" : "Edit")
-                                .font(.subheadline)
-                                .fixedSize()
+                                .foregroundColor(showStreaks ? .orange : .gray)
                         }
-                        .foregroundColor(isEditMode ? .yellow : .gray)
-                    }
-                    .padding()
+                        .padding(.trailing, 8)
 
-                    Spacer()
-
-                    Button(action: {
-                        withAnimation {
-                            showStreaks.toggle()
-                        }
-                    }) {
-                        Image(systemName: showStreaks ? "flame.circle.fill" : "flame.circle")
-                            .font(.title2)
-                            .foregroundColor(showStreaks ? .orange : .gray)
-                    }
-                    .padding(.trailing, 8)
-
-                    Button(action: {
-                        withAnimation {
-                            showLegend.toggle()
-                        }
-                    }) {
-                        Image(systemName: showLegend ? "list.bullet.circle.fill" : "list.bullet.circle")
-                            .font(.title2)
-                            .foregroundColor(showLegend ? .cyan : .gray)
-                    }
-                    .padding(.trailing, 8)
-
-                    Button(action: {
-                        showGridLines.toggle()
-                    }) {
-                        Image(systemName: showGridLines ? "grid.circle.fill" : "grid.circle")
-                            .font(.title2)
-                            .foregroundColor(showGridLines ? .yellow : .gray)
-                    }
-                    .padding(.trailing, 8)
-
-                    Button(action: {
-                        withAnimation {
-                            isPresented = false
-                        }
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title)
-                            .foregroundColor(.gray)
-                    }
-                    .padding()
-                }
-
-                HStack(alignment: .top, spacing: 8) {
-                    // Legend (left side)
-                    VStack(alignment: .trailing, spacing: 0) {
-                        // Spacer for month markers row
-                        Color.clear.frame(height: 20)
-
-                        // Legend items aligned with grid rows
-                        let gridPadding: CGFloat = cellSpacing / 2 + 1
-                        VStack(alignment: .trailing, spacing: cellSpacing) {
-                            ForEach(activities.indices, id: \.self) { index in
-                                HStack(spacing: 4) {
-                                    Text(trimTrailingEmoji(activities[index].name))
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.gray)
-                                        .lineLimit(1)
-                                    Circle()
-                                        .fill(activities[index].color)
-                                        .frame(width: 8, height: 8)
-                                }
-                                .frame(height: cellSize)
+                        Button(action: {
+                            withAnimation {
+                                showLegend.toggle()
                             }
+                        }) {
+                            Image(systemName: showLegend ? "list.bullet.circle.fill" : "list.bullet.circle")
+                                .font(.title2)
+                                .foregroundColor(showLegend ? .cyan : .gray)
                         }
-                        .padding(.top, gridPadding)
+                        .padding(.trailing, 8)
+
+                        Button(action: {
+                            showGridLines.toggle()
+                        }) {
+                            Image(systemName: showGridLines ? "grid.circle.fill" : "grid.circle")
+                                .font(.title2)
+                                .foregroundColor(showGridLines ? .yellow : .gray)
+                        }
+                        .padding(.trailing, 8)
+
+                        Button(action: {
+                            withAnimation {
+                                isPresented = false
+                            }
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
                     }
-                    .frame(width: showLegend ? 70 : 0)
-                    .opacity(showLegend ? 1 : 0)
-                    .clipped()
-                    .drawingGroup()
-                    .animation(.easeInOut(duration: 0.25), value: showLegend)
 
-                    YearGridView(
-                        yearData: dataManager.yearData,
-                        selectedDate: selectedDate,
-                        activities: activities,
-                        dataManager: dataManager,
-                        isExpanded: true,
-                        isEditMode: isEditMode,
-                        showGridLines: showGridLines,
-                        showStreakOverlay: showStreaks,
-                        onCellTap: { dayOfYear, activityIndex in
-                            toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
-                        }
-                    )
+                    ZStack {
+                    HStack(alignment: .top, spacing: 8) {
+                        // Legend (left side)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            // Spacer for month markers row
+                            Color.clear.frame(height: 16 * gridScale)
 
-                    // Streak badges (right side)
-                    VStack(alignment: .leading, spacing: 0) {
-                        // Spacer for month markers row
-                        Color.clear.frame(height: 20)
-
-                        // Streak items aligned with grid rows
-                        let gridPadding: CGFloat = cellSpacing / 2 + 1
-                        VStack(alignment: .leading, spacing: cellSpacing) {
-                            ForEach(activities.indices, id: \.self) { index in
-                                let isLogged = isActivityLoggedToday(for: index)
-                                let streak = currentStreak(for: index)
-                                let potential = potentialStreak(for: index)
-
-                                HStack(spacing: 4) {
-                                    if isLogged && streak > 0 {
-                                        // Active streak - full opacity
-                                        Text("\(streak)d")
-                                            .font(.system(size: 9, weight: .medium))
-                                            .foregroundColor(.white)
-                                    } else if !isLogged && potential > 0 {
-                                        // Continuable streak - lower opacity
-                                        Text("\(potential)d")
-                                            .font(.system(size: 9, weight: .medium))
-                                            .foregroundColor(.white.opacity(0.4))
+                            // Legend items aligned with grid rows
+                            let gridPadding: CGFloat = cellSpacing / 2 + 1
+                            VStack(alignment: .trailing, spacing: cellSpacing) {
+                                ForEach(activities.indices, id: \.self) { index in
+                                    HStack(spacing: 4) {
+                                        Text(trimTrailingEmoji(activities[index].name))
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.gray)
+                                            .lineLimit(1)
+                                        Circle()
+                                            .fill(activities[index].color)
+                                            .frame(width: 8, height: 8)
                                     }
+                                    .frame(height: cellSize)
                                 }
-                                .frame(height: cellSize)
                             }
+                            .padding(.top, gridPadding)
                         }
-                        .padding(.top, gridPadding)
+                        .frame(width: showLegend ? 70 : 0)
+                        .opacity(showLegend ? 1 : 0)
+                        .clipped()
+                        .drawingGroup()
+                        .animation(.easeInOut(duration: 0.25), value: showLegend)
+
+                        YearGridView(
+                            yearData: dataManager.yearData,
+                            selectedDate: selectedDate,
+                            activities: activities,
+                            dataManager: dataManager,
+                            isExpanded: true,
+                            isEditMode: isEditMode,
+                            showGridLines: showGridLines,
+                            showStreakOverlay: showStreaks,
+                            zoomScale: gridScale,
+                            onCellTap: { dayOfYear, activityIndex in
+                                toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
+                            }
+                        )
+
+                        // Streak badges (right side)
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Spacer for month markers row
+                            Color.clear.frame(height: 16 * gridScale)
+
+                            // Streak items aligned with grid rows
+                            let gridPadding: CGFloat = cellSpacing / 2 + 1
+                            VStack(alignment: .leading, spacing: cellSpacing) {
+                                ForEach(activities.indices, id: \.self) { index in
+                                    let isLogged = isActivityLoggedToday(for: index)
+                                    let streak = currentStreak(for: index)
+                                    let potential = potentialStreak(for: index)
+
+                                    HStack(spacing: 4) {
+                                        if isLogged && streak > 0 {
+                                            // Active streak - full opacity
+                                            Text("\(streak)d")
+                                                .font(.system(size: 9, weight: .medium))
+                                                .foregroundColor(.white)
+                                        } else if !isLogged && potential > 0 {
+                                            // Continuable streak - lower opacity
+                                            Text("\(potential)d")
+                                                .font(.system(size: 9, weight: .medium))
+                                                .foregroundColor(.white.opacity(0.4))
+                                        }
+                                    }
+                                    .frame(height: cellSize)
+                                }
+                            }
+                            .padding(.top, gridPadding)
+                        }
+                        .frame(width: showStreaks ? 30 : 0)
+                        .opacity(showStreaks ? 1 : 0)
+                        .clipped()
+                        .drawingGroup()
+                        .animation(.easeInOut(duration: 0.25), value: showStreaks)
                     }
-                    .frame(width: showStreaks ? 30 : 0)
-                    .opacity(showStreaks ? 1 : 0)
-                    .clipped()
-                    .drawingGroup()
-                    .animation(.easeInOut(duration: 0.25), value: showStreaks)
                 }
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            let newScale = lastPinchScale * value
+                            gridScale = min(max(newScale, minScale), maxScale)
+                        }
+                        .onEnded { value in
+                            lastPinchScale = gridScale
+                        }
+                )
                 .padding(.leading, 8)
                 .padding(.trailing, 16)
-                .padding(.top, 40)
+                .padding(.top, 8)
 
                 if isEditMode {
                     Text("Tap cells to toggle")
@@ -757,11 +916,104 @@ struct ExpandedYearGridView: View {
                         .padding(.top, 8)
                 }
 
-                Spacer()
+                // Info button below grid
+                Button(action: {
+                    withAnimation {
+                        showStats.toggle()
+                    }
+                }) {
+                    Image(systemName: showStats ? "info.circle.fill" : "info.circle")
+                        .font(.title3)
+                        .foregroundColor(showStats ? .blue : .gray)
+                }
+                .padding(.top, 11)
+
+                // Stats section
+                if showStats {
+                    VStack(spacing: 0) {
+                        // Header row
+                        HStack(spacing: 0) {
+                            Text("Activity")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("Best")
+                                .frame(width: 50, alignment: .trailing)
+                            Text("Total")
+                                .frame(width: 50, alignment: .trailing)
+                            Text(verbatim: "\(displayYear)")
+                                .frame(width: 50, alignment: .trailing)
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.gray)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+
+                        Divider()
+                            .background(Color.gray.opacity(0.3))
+
+                        // Data rows in ScrollView for many activities
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(activities.indices, id: \.self) { index in
+                                    let stats = allTimeStats(for: index)
+                                    let completionRate = currentYearCompletionRate(for: index)
+
+                                    HStack(spacing: 0) {
+                                        // Activity name with color dot
+                                        HStack(spacing: 6) {
+                                            Circle()
+                                                .fill(activities[index].color)
+                                                .frame(width: 8, height: 8)
+                                            Text(trimTrailingEmoji(activities[index].name))
+                                                .lineLimit(1)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        // Best streak
+                                        HStack(spacing: 5) {
+                                            if stats.isOngoing && stats.longestStreak > 0 {
+                                                Text("🔥")
+                                                    .font(.system(size: 10))
+                                            }
+                                            Text("\(stats.longestStreak)")
+                                                .fontWeight(stats.isOngoing ? .bold : .regular)
+                                                .foregroundColor(stats.isOngoing ? .orange : .white)
+                                        }
+                                        .frame(width: 50, alignment: .trailing)
+
+                                        // Total days
+                                        Text("\(stats.totalDays)")
+                                            .frame(width: 50, alignment: .trailing)
+
+                                        // Completion rate
+                                        Text("\(Int(completionRate * 100))%")
+                                            .frame(width: 50, alignment: .trailing)
+                                    }
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+
+                                    if index < activities.count - 1 {
+                                        Divider()
+                                            .background(Color.gray.opacity(0.2))
+                                            .padding(.leading, 26)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 300)
+                    }
+                    .background(Color.white.opacity(0.08))
+                    .cornerRadius(10)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                }
             }
+            .padding(.bottom, 16)
+        }
         }
         .onTapGesture {
-            if !isEditMode && !showStreaks && !showLegend {
+            if !isEditMode && !showStreaks && !showLegend && !showStats {
                 withAnimation {
                     isPresented = false
                 }
@@ -772,7 +1024,7 @@ struct ExpandedYearGridView: View {
             let legendState = showLegend
             let streaksState = showStreaks
             showLegend = false
-            showStreaks = false
+            showStreaks = true
             DispatchQueue.main.async {
                 showLegend = legendState
                 showStreaks = streaksState
