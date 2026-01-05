@@ -2,6 +2,7 @@ import SwiftUI
 import GoogleSignIn
 import GoogleAPIClientForREST
 import GTMSessionFetcher
+import Security
 
 // Activity model
 struct Activity: Identifiable, Codable {
@@ -1335,6 +1336,7 @@ class LocalDataManager: ObservableObject {
 }
 
 // Google Sheets Exporter for colored export
+@MainActor
 class GoogleSheetsExporter: ObservableObject {
     private var service: GTLRSheetsService?
     @Published var isSignedIn = false
@@ -1349,28 +1351,43 @@ class GoogleSheetsExporter: ObservableObject {
         set { defaults.set(newValue, forKey: savedSpreadsheetKey) }
     }
 
-    private let requiredScope = "https://www.googleapis.com/auth/spreadsheets"
+    private let requiredScope = "https://www.googleapis.com/auth/drive.file"
 
     init() {
-        // Restore previous sign-in
-        GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
-            guard let self = self else { return }
-            if let user = user {
-                // Check if user has the required spreadsheets scope
-                let grantedScopes = user.grantedScopes ?? []
-                if grantedScopes.contains(self.requiredScope) {
-                    let service = GTLRSheetsService()
-                    service.authorizer = user.fetcherAuthorizer
-                    self.service = service
-                    DispatchQueue.main.async {
-                        self.isSignedIn = true
-                    }
-                } else {
-                    // User is signed in but missing scope - they'll need to sign in again
-                    GIDSignIn.sharedInstance.signOut()
-                }
-            }
+        // Clear old Google Sign-In keychain entries that may be incompatible with new SDK
+        Self.clearGoogleKeychainEntries()
+    }
+
+    private static func clearGoogleKeychainEntries() {
+        // Delete all generic password keychain items for Google services
+        let services = [
+            "com.google.GTMAppAuth.AuthState",
+            "com.google.GIDSignIn",
+            "watersong.happyhabits",
+            "watersong.happyhabits.GTMAppAuth",
+            "GTMAppAuth",
+            "GTMAppAuth.AuthState"
+        ]
+
+        for service in services {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service
+            ]
+            SecItemDelete(query as CFDictionary)
         }
+
+        // Delete ALL generic passwords for this app (nuclear option)
+        let deleteAllQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword
+        ]
+        SecItemDelete(deleteAllQuery as CFDictionary)
+
+        // Also clear internet passwords
+        let internetQuery: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword
+        ]
+        SecItemDelete(internetQuery as CFDictionary)
     }
 
     func signIn(completion: @escaping (Bool) -> Void) {
@@ -1379,25 +1396,31 @@ class GoogleSheetsExporter: ObservableObject {
             return
         }
 
-        GIDSignIn.sharedInstance.signIn(
-            withPresenting: presentingViewController,
-            hint: nil,
-            additionalScopes: [requiredScope]
-        ) { [weak self] result, error in
-            if let user = result?.user {
-                let service = GTLRSheetsService()
-                service.authorizer = user.fetcherAuthorizer
-                self?.service = service
-                self?.isSignedIn = true
+        Task { @MainActor in
+            do {
+                let result = try await GIDSignIn.sharedInstance.signIn(
+                    withPresenting: presentingViewController,
+                    hint: nil,
+                    additionalScopes: [requiredScope]
+                )
+                let user = result.user
+                let sheetsService = GTLRSheetsService()
+                sheetsService.callbackQueue = DispatchQueue.main
+                sheetsService.authorizer = user.fetcherAuthorizer
+                self.service = sheetsService
+                self.isSignedIn = true
                 completion(true)
-            } else {
-                DispatchQueue.main.async {
-                    let errorMsg = error?.localizedDescription ?? "Sign in cancelled"
-                    self?.exportStatus = "Sign in failed: \(errorMsg)"
-                }
+            } catch {
+                self.exportStatus = "Sign in failed: \(error.localizedDescription)"
                 completion(false)
             }
         }
+    }
+
+    func signOut() {
+        GIDSignIn.sharedInstance.signOut()
+        service = nil
+        isSignedIn = false
     }
 
     func createNewSpreadsheet(forYear year: Int, completion: @escaping (Bool, String?) -> Void) {
@@ -1420,9 +1443,8 @@ class GoogleSheetsExporter: ObservableObject {
             DispatchQueue.main.async {
                 if let error = error {
                     self?.isExporting = false
-                    let errorMsg = error.localizedDescription
                     self?.exportStatus = "Failed to create spreadsheet"
-                    print("Error creating spreadsheet: \(errorMsg)")
+                    print("Error creating spreadsheet: \(error.localizedDescription)")
                     completion(false, nil)
                     return
                 }
@@ -1619,7 +1641,7 @@ class GoogleSheetsExporter: ObservableObject {
             spreadsheetId: spreadsheetId)
 
         service.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self?.isExporting = false
 
                 if let error = error {
@@ -1667,7 +1689,7 @@ class GoogleSheetsExporter: ObservableObject {
         let query = GTLRSheetsQuery_SpreadsheetsValuesGet.query(withSpreadsheetId: spreadsheetId, range: range)
 
         service.executeQuery(query) { [weak self] (ticket, result, error) in
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self?.isExporting = false
 
                 if let error = error {
@@ -2233,7 +2255,6 @@ struct ExportView: View {
     @State private var showShareSheet = false
     @State private var fileURL: URL?
     @StateObject private var sheetsExporter = GoogleSheetsExporter()
-    @State private var spreadsheetId: String = ""
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var createdSheetUrl: String?
@@ -2303,6 +2324,19 @@ struct ExportView: View {
                             }
                             .padding(.horizontal)
                         } else {
+                            // Signed in - show sign out option
+                            Button(action: {
+                                sheetsExporter.signOut()
+                            }) {
+                                HStack {
+                                    Image(systemName: "person.circle.fill")
+                                    Text("Sign Out")
+                                }
+                                .font(.caption)
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 5)
+
                             // Create new spreadsheet
                             Button(action: {
                                 sheetsExporter.createNewSpreadsheet(forYear: selectedYear) { success, id in
@@ -2342,36 +2376,20 @@ struct ExportView: View {
                             .disabled(sheetsExporter.isExporting)
                             .padding(.horizontal)
 
-                            Text("or")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 5)
-
-                            // Export to existing spreadsheet
-                            VStack(spacing: 10) {
-                                TextField("Paste Google Sheets URL or ID", text: $spreadsheetId)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                                    .autocapitalization(.none)
-                                    .padding(.horizontal)
-
-                                if let savedId = sheetsExporter.savedSpreadsheetId, spreadsheetId.isEmpty {
-                                    Button(action: {
-                                        spreadsheetId = savedId
-                                    }) {
-                                        Text("Use last sheet: \(savedId.prefix(10))...")
-                                            .font(.caption)
-                                            .foregroundColor(.blue)
-                                    }
-                                }
+                            // Update last exported sheet (if one exists)
+                            if let savedId = sheetsExporter.savedSpreadsheetId {
+                                Text("or")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 5)
 
                                 Button(action: {
-                                    let extractedId = extractSpreadsheetId(from: spreadsheetId)
-                                    sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: extractedId, forYear: selectedYear) { success, message in
+                                    sheetsExporter.exportToGoogleSheets(dataManager: dataManager, activitiesManager: activitiesManager, spreadsheetId: savedId, forYear: selectedYear) { success, message in
                                         alertMessage = message
                                         showAlert = true
                                         if success {
-                                            createdSheetUrl = sheetsExporter.getSpreadsheetUrl(id: extractedId)
+                                            createdSheetUrl = sheetsExporter.getSpreadsheetUrl(id: savedId)
                                         }
                                     }
                                 }) {
@@ -2382,15 +2400,15 @@ struct ExportView: View {
                                                 .padding(.trailing, 5)
                                         }
                                         Image(systemName: "arrow.up.doc")
-                                        Text(sheetsExporter.isExporting ? sheetsExporter.exportStatus : "Export to This Sheet")
+                                        Text(sheetsExporter.isExporting ? sheetsExporter.exportStatus : "Update Last Exported Sheet")
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding()
-                                    .background(spreadsheetId.isEmpty || sheetsExporter.isExporting ? Color.gray : Color.orange)
+                                    .background(sheetsExporter.isExporting ? Color.gray : Color.orange)
                                     .foregroundColor(.white)
                                     .cornerRadius(10)
                                 }
-                                .disabled(spreadsheetId.isEmpty || sheetsExporter.isExporting)
+                                .disabled(sheetsExporter.isExporting)
                                 .padding(.horizontal)
                             }
 
@@ -2445,18 +2463,6 @@ struct ExportView: View {
             print("Error writing CSV file: \(error)")
         }
     }
-
-    private func extractSpreadsheetId(from input: String) -> String {
-        // Handle full URL: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit...
-        if input.contains("docs.google.com/spreadsheets") {
-            let components = input.components(separatedBy: "/")
-            if let dIndex = components.firstIndex(of: "d"), dIndex + 1 < components.count {
-                return components[dIndex + 1]
-            }
-        }
-        // Otherwise assume it's just the ID
-        return input.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
 
 struct ImportView: View {
@@ -2465,7 +2471,6 @@ struct ImportView: View {
     let selectedYear: Int
     @Environment(\.dismiss) var dismiss
     @StateObject private var sheetsExporter = GoogleSheetsExporter()
-    @State private var spreadsheetId: String = ""
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var showConfirmImport = false
@@ -2512,46 +2517,47 @@ struct ImportView: View {
                                 .foregroundColor(.green)
                                 .padding(.horizontal)
 
-                            TextField("Paste Google Sheets URL or ID", text: $spreadsheetId)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
+                            if let savedId = sheetsExporter.savedSpreadsheetId {
+                                Button(action: {
+                                    sheetsExporter.importFromGoogleSheets(
+                                        spreadsheetId: savedId,
+                                        forYear: selectedYear,
+                                        activitiesManager: activitiesManager
+                                    ) { success, message, importedData in
+                                        if success, let data = importedData {
+                                            pendingImportData = data
+                                            alertMessage = message
+                                            showConfirmImport = true
+                                        } else {
+                                            alertMessage = message
+                                            showAlert = true
+                                        }
+                                    }
+                                }) {
+                                    HStack {
+                                        if sheetsExporter.isExporting {
+                                            ProgressView()
+                                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                                .padding(.trailing, 5)
+                                        }
+                                        Image(systemName: "square.and.arrow.down")
+                                        Text("Import from Last Exported Sheet")
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(sheetsExporter.isExporting ? Color.gray : Color.green)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                                }
+                                .disabled(sheetsExporter.isExporting)
                                 .padding(.horizontal)
-
-                            Button(action: {
-                                let extractedId = extractSpreadsheetId(from: spreadsheetId)
-                                sheetsExporter.importFromGoogleSheets(
-                                    spreadsheetId: extractedId,
-                                    forYear: selectedYear,
-                                    activitiesManager: activitiesManager
-                                ) { success, message, importedData in
-                                    if success, let data = importedData {
-                                        pendingImportData = data
-                                        alertMessage = message
-                                        showConfirmImport = true
-                                    } else {
-                                        alertMessage = message
-                                        showAlert = true
-                                    }
-                                }
-                            }) {
-                                HStack {
-                                    if sheetsExporter.isExporting {
-                                        ProgressView()
-                                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                            .padding(.trailing, 5)
-                                    }
-                                    Image(systemName: "square.and.arrow.down")
-                                    Text("Import Data")
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(spreadsheetId.isEmpty ? Color.gray : Color.green)
-                                .foregroundColor(.white)
-                                .cornerRadius(10)
+                            } else {
+                                Text("No previously exported sheet found. Export data first to enable importing.")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal)
                             }
-                            .disabled(spreadsheetId.isEmpty || sheetsExporter.isExporting)
-                            .padding(.horizontal)
 
                             if !sheetsExporter.exportStatus.isEmpty {
                                 Text(sheetsExporter.exportStatus)
@@ -2589,16 +2595,6 @@ struct ImportView: View {
         } message: {
             Text("\(alertMessage)\n\nThis will merge with your existing data. Continue?")
         }
-    }
-
-    private func extractSpreadsheetId(from input: String) -> String {
-        if input.contains("docs.google.com/spreadsheets") {
-            let components = input.components(separatedBy: "/")
-            if let dIndex = components.firstIndex(of: "d"), dIndex + 1 < components.count {
-                return components[dIndex + 1]
-            }
-        }
-        return input.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
