@@ -148,6 +148,7 @@ struct DayColumnView: View {
     let isMonthStart: Bool
     let isLastDay: Bool
     let isExpanded: Bool
+    let isDarkMode: Bool
     let onCellTap: ((Int, Int) -> Void)?
 
     private var gridPadding: CGFloat { cellSpacing / 2 + 1 }
@@ -186,15 +187,14 @@ struct DayColumnView: View {
                     context.fill(Path(rect), with: .color(activities[index].color))
                 } else {
                     let rect = CGRect(x: 0, y: y, width: size.width, height: cellSize)
-                    // Expanded view has black background; compact adapts to system theme
-                    let emptyColor = isExpanded ? Color.black : Color(.systemBackground)
+                    let emptyColor = isDarkMode ? Color.black : Color(.systemBackground)
                     context.fill(Path(rect), with: .color(emptyColor))
                 }
             }
 
             // Draw grid lines if enabled
             if showGridLines {
-                let gridColor = Color.white.opacity(0.15)
+                let gridColor = isDarkMode ? Color.white.opacity(0.15) : Color.black.opacity(0.1)
 
                 // Horizontal lines between each cell
                 for i in 0...activities.count {
@@ -222,7 +222,7 @@ struct DayColumnView: View {
 
             // Draw month separator line
             if isMonthStart {
-                let monthLineColor = Color.white.opacity(0.3)
+                let monthLineColor = isDarkMode ? Color.white.opacity(0.3) : Color.black.opacity(0.2)
                 var monthPath = Path()
                 monthPath.move(to: CGPoint(x: 0, y: 0))
                 monthPath.addLine(to: CGPoint(x: 0, y: size.height))
@@ -233,7 +233,7 @@ struct DayColumnView: View {
         .overlay(
             // Selection border - thin stroke inside bounds
             Rectangle()
-                .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: 1)
+                .strokeBorder(isSelected ? (isDarkMode ? Color.white : Color.black) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture { location in
@@ -265,6 +265,7 @@ struct YearGridView: View {
     var showGridLines: Bool = false
     var showStreakOverlay: Bool = false
     var zoomScale: CGFloat = 1.0
+    var isDarkMode: Bool = true
     var onCellTap: ((Int, Int) -> Void)? = nil  // (dayOfYear, activityIndex)
 
     // Scale up compact cells when there are fewer activities
@@ -452,6 +453,7 @@ struct YearGridView: View {
                                     isMonthStart: isExpanded && isMonthStart,
                                     isLastDay: day == daysInDisplayYear,
                                     isExpanded: isExpanded,
+                                    isDarkMode: isDarkMode,
                                     onCellTap: onCellTap
                                 )
                                 .id(day)
@@ -528,6 +530,37 @@ struct ExpandedYearGridView: View {
     @State private var showStats: Bool = false
     @State private var gridScale: CGFloat = 1.0
     @State private var lastPinchScale: CGFloat = 1.0
+    @AppStorage("appTheme") private var appTheme: String = AppTheme.system.rawValue
+    @Environment(\.colorScheme) private var systemColorScheme
+
+    private var effectiveColorScheme: ColorScheme {
+        let theme = AppTheme(rawValue: appTheme) ?? .system
+        return theme.colorScheme ?? systemColorScheme
+    }
+
+    private var isDarkMode: Bool {
+        effectiveColorScheme == .dark
+    }
+
+    private var backgroundColor: Color {
+        isDarkMode ? Color.black : Color(.systemBackground)
+    }
+
+    private var textColor: Color {
+        isDarkMode ? Color.white : Color.black
+    }
+
+    private var secondaryTextColor: Color {
+        Color.gray
+    }
+
+    private var gridLineColor: Color {
+        isDarkMode ? Color.white.opacity(0.15) : Color.black.opacity(0.1)
+    }
+
+    private var selectionBorderColor: Color {
+        isDarkMode ? Color.white : Color.black
+    }
 
     // Grid layout constants (scaled by zoom)
     private let baseCellSize: CGFloat = 16
@@ -756,7 +789,7 @@ struct ExpandedYearGridView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            backgroundColor.ignoresSafeArea()
 
             ScrollView {
                 VStack(spacing: 0) {
@@ -865,6 +898,7 @@ struct ExpandedYearGridView: View {
                             showGridLines: showGridLines,
                             showStreakOverlay: showStreaks,
                             zoomScale: gridScale,
+                            isDarkMode: isDarkMode,
                             onCellTap: { dayOfYear, activityIndex in
                                 toggleCell(dayOfYear: dayOfYear, activityIndex: activityIndex)
                             }
@@ -888,12 +922,12 @@ struct ExpandedYearGridView: View {
                                             // Active streak - full opacity
                                             Text("\(streak)d")
                                                 .font(.system(size: 9, weight: .medium))
-                                                .foregroundColor(.white)
+                                                .foregroundColor(textColor)
                                         } else if !isLogged && potential > 0 {
                                             // Continuable streak - lower opacity
                                             Text("\(potential)d")
                                                 .font(.system(size: 9, weight: .medium))
-                                                .foregroundColor(.white.opacity(0.4))
+                                                .foregroundColor(textColor.opacity(0.4))
                                         }
                                     }
                                     .frame(height: cellSize)
@@ -990,7 +1024,7 @@ struct ExpandedYearGridView: View {
                                             }
                                             Text("\(stats.longestStreak)")
                                                 .fontWeight(stats.isOngoing ? .bold : .regular)
-                                                .foregroundColor(stats.isOngoing ? .orange : .white)
+                                                .foregroundColor(stats.isOngoing ? .orange : textColor)
                                         }
                                         .frame(width: 50, alignment: .trailing)
 
@@ -1003,7 +1037,7 @@ struct ExpandedYearGridView: View {
                                             .frame(width: 50, alignment: .trailing)
                                     }
                                     .font(.system(size: 12))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(textColor)
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 6)
 
@@ -1017,7 +1051,7 @@ struct ExpandedYearGridView: View {
                         }
                         .frame(maxHeight: 320)
                     }
-                    .background(Color.white.opacity(0.08))
+                    .background(isDarkMode ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
                     .cornerRadius(10)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
@@ -1026,6 +1060,7 @@ struct ExpandedYearGridView: View {
             .padding(.bottom, 16)
         }
         }
+        .preferredColorScheme(AppTheme(rawValue: appTheme)?.colorScheme)
         .onTapGesture {
             if !isEditMode && !showStreaks && !showLegend && !showStats {
                 withAnimation {
@@ -2038,6 +2073,15 @@ struct ContentView: View {
     @State private var showSettingsSheet = false
     @State private var showExpandedGrid = false
 
+    @AppStorage("appTheme") private var appTheme: String = AppTheme.system.rawValue
+    @Environment(\.colorScheme) private var systemColorScheme
+
+    private var isDarkMode: Bool {
+        let theme = AppTheme(rawValue: appTheme) ?? .system
+        let effectiveScheme = theme.colorScheme ?? systemColorScheme
+        return effectiveScheme == .dark
+    }
+
     let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -2164,7 +2208,8 @@ struct ContentView: View {
 
                 YearGridView(yearData: dataManager.yearData,
                              selectedDate: selectedDate,
-                             activities: activitiesManager.activities)
+                             activities: activitiesManager.activities,
+                             isDarkMode: isDarkMode)
                     .padding(.horizontal)
                     .contentShape(Rectangle())
                     .simultaneousGesture(
@@ -2608,6 +2653,12 @@ struct SettingsView: View {
     @State private var showingClearDataAlert = false
     @State private var showingExportSheet = false
     @State private var showingImportSheet = false
+    @AppStorage("appTheme") private var appTheme: String = AppTheme.system.rawValue
+    @State private var selectedTheme: AppTheme = .system
+
+    private var currentTheme: AppTheme {
+        AppTheme(rawValue: appTheme) ?? .system
+    }
 
     var body: some View {
         NavigationView {
@@ -2667,6 +2718,19 @@ struct SettingsView: View {
                         Image(systemName: "plus.circle.fill")
                         Text("Add Activity")
                     }
+                }
+
+                Section {
+                    Picker("Appearance", selection: $selectedTheme) {
+                        ForEach(AppTheme.allCases, id: \.self) { theme in
+                            Text(theme.displayName).tag(theme)
+                        }
+                    }
+                    .onChange(of: selectedTheme) { _, newValue in
+                        appTheme = newValue.rawValue
+                    }
+                } header: {
+                    Text("Appearance")
                 }
 
                 Section {
@@ -2738,6 +2802,10 @@ struct SettingsView: View {
         .sheet(isPresented: $showingImportSheet) {
             ImportView(dataManager: dataManager, activitiesManager: activitiesManager, selectedYear: selectedYear)
         }
+        .onAppear {
+            selectedTheme = currentTheme
+        }
+        .preferredColorScheme(currentTheme.colorScheme)
     }
 }
 
