@@ -2809,12 +2809,16 @@ struct SettingsView: View {
     }
 }
 
-struct ActivityEditView: View {
-    @ObservedObject var activitiesManager: ActivitiesManager
-    @State var activity: Activity
-    @Environment(\.dismiss) var dismiss
+// Color palette definition
+struct ColorPaletteData {
+    let id: String
+    let name: String
+    let colors: [(name: String, color: Color)]
+}
 
-    let availableColors: [(name: String, color: Color)] = [
+// All available color palettes
+let colorPalettes: [ColorPaletteData] = [
+    ColorPaletteData(id: "original", name: "Original", colors: [
         ("Red", Color(red: 1.0, green: 0.2, blue: 0.2)),
         ("Orange", Color(red: 1.0, green: 0.6, blue: 0.0)),
         ("Yellow", Color(red: 1.0, green: 0.9, blue: 0.0)),
@@ -2828,7 +2832,83 @@ struct ActivityEditView: View {
         ("Pink", Color(red: 1.0, green: 0.4, blue: 0.7)),
         ("Brown", Color(red: 0.6, green: 0.4, blue: 0.2)),
         ("Gray", Color(red: 0.6, green: 0.6, blue: 0.6))
-    ]
+    ]),
+    ColorPaletteData(id: "purple-blue", name: "Purple & Blue", colors: [
+        ("Lavender", Color(hex: "#CCBEDB")),
+        ("Lilac", Color(hex: "#CBBDDB")),
+        ("Periwinkle", Color(hex: "#AFACD4")),
+        ("Soft Blue", Color(hex: "#A7A8D1")),
+        ("Sky Purple", Color(hex: "#8E9BCA")),
+        ("Dusty Blue", Color(hex: "#7995BF")),
+        ("Steel Blue", Color(hex: "#6F90B9")),
+        ("Ocean", Color(hex: "#51829E")),
+        ("Deep Teal", Color(hex: "#528298")),
+        ("Slate Teal", Color(hex: "#3D7484")),
+        ("Dark Teal", Color(hex: "#3E6E74")),
+        ("Sea Green", Color(hex: "#36686C")),
+        ("Forest Teal", Color(hex: "#25514D")),
+        ("Deep Forest", Color(hex: "#295450"))
+    ]),
+    ColorPaletteData(id: "earth", name: "Earth Tones", colors: [
+        ("Sage", Color(hex: "#BDC3A3")),
+        ("Moss", Color(hex: "#B8BF9C")),
+        ("Olive Mist", Color(hex: "#BCBF9E")),
+        ("Wheat", Color(hex: "#B0A880")),
+        ("Khaki", Color(hex: "#B2A782")),
+        ("Tan", Color(hex: "#A9936A")),
+        ("Sand", Color(hex: "#AC906D")),
+        ("Caramel", Color(hex: "#A37B58")),
+        ("Copper", Color(hex: "#A27459")),
+        ("Terracotta", Color(hex: "#996549")),
+        ("Brick", Color(hex: "#93534A")),
+        ("Clay", Color(hex: "#905046")),
+        ("Burgundy", Color(hex: "#7C3943")),
+        ("Wine", Color(hex: "#7B3741"))
+    ]),
+    ColorPaletteData(id: "rose", name: "Rose & Peach", colors: [
+        ("Champagne", Color(hex: "#D0C29D")),
+        ("Cream", Color(hex: "#CDBD94")),
+        ("Beige", Color(hex: "#CCB18A")),
+        ("Honey", Color(hex: "#CAA67D")),
+        ("Peach", Color(hex: "#C48C6A")),
+        ("Apricot", Color(hex: "#C3896A")),
+        ("Coral", Color(hex: "#BC6F59")),
+        ("Salmon", Color(hex: "#B5605F")),
+        ("Rose", Color(hex: "#B2575B")),
+        ("Berry", Color(hex: "#A03F61")),
+        ("Raspberry", Color(hex: "#9A3E66")),
+        ("Plum", Color(hex: "#852862")),
+        ("Magenta", Color(hex: "#74276B")),
+        ("Deep Purple", Color(hex: "#6A1E69"))
+    ]),
+    ColorPaletteData(id: "ocean", name: "Ocean & Forest", colors: [
+        ("Powder Blue", Color(hex: "#A9BEDD")),
+        ("Sky Blue", Color(hex: "#A1B9DC")),
+        ("Light Blue", Color(hex: "#8EB3D4")),
+        ("Azure", Color(hex: "#7EADCF")),
+        ("Cerulean", Color(hex: "#60A0BA")),
+        ("Aqua", Color(hex: "#609FB5")),
+        ("Teal", Color(hex: "#448E98")),
+        ("Sea Teal", Color(hex: "#498B8A")),
+        ("Jade", Color(hex: "#3B807C")),
+        ("Emerald", Color(hex: "#30705F")),
+        ("Forest", Color(hex: "#336E5A")),
+        ("Hunter", Color(hex: "#245A3C")),
+        ("Pine", Color(hex: "#36674E"))
+    ])
+]
+
+struct ActivityEditView: View {
+    @ObservedObject var activitiesManager: ActivitiesManager
+    @State var activity: Activity
+    @Environment(\.dismiss) var dismiss
+    @State private var selectedPaletteIndex = 0
+    @State private var showCustomPicker = false
+    @State private var customColor: Color = .gray
+
+    private var currentColors: [(name: String, color: Color)] {
+        colorPalettes[selectedPaletteIndex].colors
+    }
 
     var body: some View {
         NavigationView {
@@ -2837,22 +2917,87 @@ struct ActivityEditView: View {
                     TextField("Name", text: $activity.name)
                 }
 
-                Section("Color") {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 50))], spacing: 15) {
-                        ForEach(availableColors, id: \.name) { colorOption in
-                            Circle()
-                                .fill(colorOption.color)
-                                .frame(width: 50, height: 50)
-                                .overlay(
-                                    Circle()
-                                        .stroke(activity.colorHex == colorOption.color.toHex() ? Color.white : Color.clear, lineWidth: 3)
-                                )
-                                .onTapGesture {
-                                    activity.colorHex = colorOption.color.toHex()
+                Section {
+                    // Palette selector
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(colorPalettes.enumerated()), id: \.element.id) { index, palette in
+                                Button(action: {
+                                    selectedPaletteIndex = index
+                                    showCustomPicker = false
+                                }) {
+                                    Text(palette.name)
+                                        .font(.subheadline)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(selectedPaletteIndex == index && !showCustomPicker ? Color.accentColor : Color(.systemGray5))
+                                        .foregroundColor(selectedPaletteIndex == index && !showCustomPicker ? .white : .primary)
+                                        .cornerRadius(16)
                                 }
+                                .buttonStyle(.plain)
+                            }
+                            Button(action: {
+                                showCustomPicker = true
+                                customColor = Color(hex: activity.colorHex)
+                            }) {
+                                Text("Custom")
+                                    .font(.subheadline)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(showCustomPicker ? Color.accentColor : Color(.systemGray5))
+                                    .foregroundColor(showCustomPicker ? .white : .primary)
+                                    .cornerRadius(16)
+                            }
+                            .buttonStyle(.plain)
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical)
+
+                    if showCustomPicker {
+                        // Custom color picker
+                        VStack(spacing: 12) {
+                            ColorPicker("Select Custom Color", selection: $customColor, supportsOpacity: false)
+                            Button("Apply Custom Color") {
+                                activity.colorHex = customColor.toHex()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(.vertical, 8)
+                    } else {
+                        // Color grid for selected palette
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 50))], spacing: 15) {
+                            ForEach(currentColors, id: \.name) { colorOption in
+                                Circle()
+                                    .fill(colorOption.color)
+                                    .frame(width: 50, height: 50)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(activity.colorHex.uppercased() == colorOption.color.toHex().uppercased() ? Color.white : Color.clear, lineWidth: 3)
+                                    )
+                                    .onTapGesture {
+                                        activity.colorHex = colorOption.color.toHex()
+                                    }
+                            }
+                        }
+                        .padding(.vertical)
+                    }
+
+                    // Current color indicator
+                    HStack {
+                        Text("Selected:")
+                            .foregroundColor(.secondary)
+                        Circle()
+                            .fill(Color(hex: activity.colorHex))
+                            .frame(width: 24, height: 24)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
+                        Text(activity.colorHex.uppercased())
+                            .font(.system(.body, design: .monospaced))
+                    }
+                } header: {
+                    Text("Color Palette")
                 }
 
                 Section {
